@@ -47,12 +47,12 @@
 | GitHub Release `v1.1` | **опубликован** 2026-10-18T09:00:49Z, latest |
 | Ассет `CampaignThreatRadar.jar` | **4205 байт**, state `uploaded` |
 | SHA-256 jar | `2b9d7e77f3d4cd1950093489353f402b9e60d17ae9df199a626e0015c8c6d000` |
-| Ассет `CampaignThreatRadar.zip` | **3271 байт** (добавляется к тому же релизу v1.1) |
+| Файл `CampaignThreatRadar.zip` | **3271 байт**, в репозитории: `dist/CampaignThreatRadar.zip` (PR #5, merge `aa7f14e`), артефакт `CampaignThreatRadar-zip` в CI |
 | SHA-256 zip | `9a55dd5f9a6444d1b1f4fd0bf6a616b957196930c259e423d2467c140c61adf9` |
+| Ассет zip в релизе v1.1 | **пока НЕ приложен**: из песочницы `gh release upload` умирает на `uploads.github.com` (хост заблокирован), `gh workflow run` даёт 403, а пушить теги сессия не может. Приложить через веб-интерфейс GitHub (Release v1.1 → Edit → вложить файл) или следующим тегом — workflow с PR #5 прикладывает оба файла сам |
 
 Релиз: `https://github.com/homa95120-wq/-/releases/tag/v1.1`
-(jar: `.../releases/download/v1.1/CampaignThreatRadar.jar`,
-zip: `.../releases/download/v1.1/CampaignThreatRadar.zip`).
+(jar: `.../releases/download/v1.1/CampaignThreatRadar.jar`).
 
 Проверка состояния одной командой:
 `gh release view v1.1 --json tagName,assets` — сверять размеры и хэши с таблицей
@@ -69,8 +69,9 @@ git tag -f v1.1 <commit-on-main>
 git push origin v1.1
 ```
 
-Добавить/заменить файл в существующем релизе без пересоздания:
-`gh release upload v1.1 dist/CampaignThreatRadar.zip --clobber`.
+Добавить/заменить файл в существующем релизе: из песочницы нельзя
+(`gh release upload` ходит на заблокированный `uploads.github.com`) —
+только веб-интерфейс GitHub или новый тег (workflow сам всё приложит).
 
 ## 3. Пути игры (проверено по исходникам v160.7)
 
@@ -115,7 +116,12 @@ git push origin v1.1
 
 ## 5. Что осталось (задачи)
 
-1. **Пользователь ставит один из файлов релиза v1.1 в Steam** (его случай):
+0. **Приложить zip к релизу v1.1** (см. таблицу выше): через веб-интерфейс
+   GitHub вложить `dist/CampaignThreatRadar.zip` в релиз v1.1 и проверить
+   `gh release view v1.1 --json assets` (должно стать 2 ассета) и
+   `gh api repos/homa95120-wq/- --jq .language` (должно остаться `Java`).
+   Альтернатива — следующий тег `v*`: обновлённый `release.yml` всё сделает сам.
+1. **Пользователь ставит jar из релиза v1.1 или zip из репозитория в Steam** (его случай):
    `<игра>\saves\mods\`, старые распакованные файлы оттуда удалить, полный
    перезапуск, включить **Campaign Threat Radar** (jar) *или*
    **Campaign Threat Radar (ZIP)** (zip), ещё раз перезапуск, зайти в кампанию.
@@ -128,9 +134,9 @@ git push origin v1.1
 3. Если zip-версия в игре заработает — отметить это здесь и в `README.md`
    (снять «в игре ещё не запускалась»). Если нет — лог `[campaign-radar]`
    покажет место; чинить в `scriptmod/scripts/main.js`, пересобирать
-   `python3 scriptmod/build.py`, перевыкладывать ассет
-   (`gh release upload v1.1 dist/CampaignThreatRadar.zip --clobber`) и
-   обновлять хэш в README и здесь.
+   `python3 scriptmod/build.py`, обновлять файл в репозитории и хэш здесь
+   и в README, а ассет релиза заменять через веб-интерфейс или новым тегом
+   (`gh release upload` из песочницы не работает — см. задачу 0).
 4. Необязательное улучшение: поле `repo: homa95120-wq/-` в корневом `mod.hjson`
    (кнопка обновления в списке модов). Меняет jar — нужен новый тег/релиз
    (например `v1.1.1`) и повторная сверка хэшей.
@@ -152,7 +158,7 @@ gh release view v1.1 --json tagName,assets              # релиз и ассе
 gh api repos/homa95120-wq/- --jq .language              # должно быть "Java"
 python3 scriptmod/build.py                              # пересобрать zip
 node scriptmod/test-logic.js && node scriptmod/test-hud.js
-gh release upload v1.1 dist/CampaignThreatRadar.zip --clobber
+# ассет в релиз: только веб-интерфейс GitHub или новый тег (см. задачу 0)
 git tag -f v1.2 <commit-on-main> && git push origin v1.2 -f   # новый релиз
 ```
 

@@ -42,10 +42,18 @@ Mindustry Java mod template (GitHub-release `dependencies.jar`, Java 17).
 
 Последний релиз: **[v1.1](../../releases/latest)**
 
-- `CampaignThreatRadar.jar` — 4205 байт,
+- `CampaignThreatRadar.jar` — в релизе v1.1: 4205 байт,
   SHA-256 `2b9d7e77f3d4cd1950093489353f402b9e60d17ae9df199a626e0015c8c6d000`
-- `CampaignThreatRadar.zip` — 3271 байт,
-  SHA-256 `9a55dd5f9a6444d1b1f4fd0bf6a616b957196930c259e423d2467c140c61adf9`
+- `CampaignThreatRadar.zip` — пока лежит в репозитории:
+  [`dist/CampaignThreatRadar.zip`](../../blob/main/dist/CampaignThreatRadar.zip)
+  (на странице файла кнопка **Download raw file**), 3271 байт,
+  SHA-256 `9a55dd5f9a6444d1b1f4fd0bf6a616b957196930c259e423d2467c140c61adf9`.
+  К релизу он приложится автоматически начиная со следующего тега
+  (workflow `Release` уже прикладывает оба файла); к v1.1 его нужно
+  приложить вручную через веб-интерфейс GitHub — из песочницы загрузка
+  ассетов заблокирована (`uploads.github.com` недоступен, workflow
+  dispatch даёт 403). Тот же файл есть артефактом `CampaignThreatRadar-zip`
+  у каждого запуска **Actions → Build Mod** (нужен вход в GitHub).
 
 Файлы скачиваются одним кликом и без входа в GitHub. В описании каждого релиза указаны
 его собственные размер и SHA-256 — сверьте их со скачанным файлом:

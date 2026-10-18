@@ -4,6 +4,8 @@ import arc.Core;
 import arc.Events;
 import arc.graphics.Color;
 import arc.math.Mathf;
+import arc.scene.event.ClickListener;
+import arc.scene.event.InputEvent;
 import arc.scene.event.Touchable;
 import arc.scene.ui.Label;
 import arc.scene.ui.layout.Scl;
@@ -12,6 +14,7 @@ import arc.struct.ObjectIntMap;
 import arc.struct.Seq;
 import arc.util.Time;
 import mindustry.Vars;
+import mindustry.content.Blocks;
 import mindustry.content.StatusEffects;
 import mindustry.game.EventType.ClientLoadEvent;
 import mindustry.game.SpawnGroup;
@@ -33,8 +36,9 @@ import mindustry.world.meta.BlockGroup;
  * A HUD-only campaign and singleplayer tactical radar for Mindustry v8 (builds 154 and newer).
  * Positioned at top-right, to the left of the vanilla minimap, and made of:
  * <ul>
- *     <li>a text panel with enemy counts, threat ETAs, base diagnostics and forecasts,</li>
- *     <li>a small tactical whole-map view with every core, spawn, enemy and weak defence sector.</li>
+ *     <li>a compact text panel with enemy counts, threat ETAs, key diagnostics and forecasts,</li>
+ *     <li>a responsive whole-map view with every core, spawn, enemy and weak defence sector,</li>
+ *     <li>a clickable, terrain-checked defense blueprint that remains a recommendation only.</li>
  * </ul>
  * Does not create entities, modify rules, or send packets (hidden: true).
  */
@@ -52,9 +56,15 @@ public class CampaignThreatRadar extends Mod{
     /** Width of the vanilla minimap in UI units (it is drawn at Scl.scl(140) + margins). */
     public static final float MINIMAP_WIDTH = 150f;
     /** Gap between the vanilla minimap and this panel, in UI units. */
-    public static final float MINIMAP_GAP = 70f;
-    /** Side of the square tactical mini map, in UI units. */
-    public static final float RADAR_SIZE = 160f;
+    public static final float MINIMAP_GAP = 40f;
+    /** Maximum width of the panel content, in UI units. */
+    public static final float PANEL_WIDTH = 390f;
+    /** Maximum side of the square tactical map, in UI units. */
+    public static final float RADAR_SIZE = 220f;
+    /** Keep the map compact on short screens; it may use at most this share of screen height. */
+    public static final float RADAR_HEIGHT_FRACTION = 0.26f;
+    /** Keep the panel to less than half the screen on narrow displays. */
+    public static final float PANEL_WIDTH_FRACTION = 0.38f;
     /** Legacy/local fallback radius when the world size is unknown, in tiles. */
     public static final float RADAR_RANGE_TILES = 120f;
     /** Distance from a core where an approaching wave should meet the defence, in tiles. */
@@ -96,9 +106,19 @@ public class CampaignThreatRadar extends Mod{
     /** Weak-point kind: front-line buildings are badly damaged. */
     public static final int MARKER_REPAIR = 4;
 
+    /** Compact defense plan marker: copper wall. */
+    public static final int PLAN_WALL = 0;
+    /** Compact defense plan marker: Duo turret. */
+    public static final int PLAN_DUO = 1;
+    /** Compact defense plan marker: Scatter anti-air turret. */
+    public static final int PLAN_SCATTER = 2;
+    /** Compact defense plan marker: Mender repair turret. */
+    public static final int PLAN_MENDER = 3;
+
     private Label status;
     private RadarMap radar;
     private float nextRefresh;
+    private int selectedTileX = -1, selectedTileY = -1;
 
     public CampaignThreatRadar(){
         // Client-only mod: never register UI hooks on a headless server.
@@ -108,24 +128,47 @@ public class CampaignThreatRadar extends Mod{
             // hudGroup is only visible while a game is running.
             Vars.ui.hudGroup.fill(t -> {
                 t.top().right();
-                t.touchable = Touchable.disabled;
+                t.touchable = Touchable.childrenOnly;
 
-                // The panel lives left of the vanilla minimap, with a clear gap
-                // so that neither of the two overlaps on small screens.
+                // Keep a predictable, compact column left of the vanilla minimap.
+                // The limits are applied in screen space so the HUD stays usable
+                // on both small windows and high-resolution displays.
                 float offset = Scl.scl(MINIMAP_WIDTH + MINIMAP_GAP);
+                float panelWidth = Scl.scl(PANEL_WIDTH);
+                float radarSize = Scl.scl(RADAR_SIZE);
                 if(Core.graphics != null){
-                    offset = Math.min(offset, Core.graphics.getWidth() * 0.5f);
+                    float screenWidth = Core.graphics.getWidth();
+                    float screenHeight = Core.graphics.getHeight();
+                    offset = Math.min(offset, screenWidth * 0.5f);
+                    panelWidth = Math.min(panelWidth, screenWidth * PANEL_WIDTH_FRACTION);
+                    radarSize = Math.min(radarSize, Math.min(panelWidth, screenHeight * RADAR_HEIGHT_FRACTION));
                 }
 
+                final float contentWidth = Math.max(1f, panelWidth);
+                final float mapSize = Math.max(1f, radarSize);
                 t.table(Styles.black8, panel -> {
                     panel.margin(6f);
+                    panel.touchable = Touchable.childrenOnly;
                     panel.defaults().left().top();
 
-                    status = panel.add("Сканирование...").color(Color.white).left().growX().get();
+                    status = panel.add("Сканирование...").color(Color.white).left().width(contentWidth).get();
+                    status.setWrap(true);
                     panel.row();
-                    radar = panel.add(new RadarMap()).size(Scl.scl(RADAR_SIZE), Scl.scl(RADAR_SIZE)).get();
+                    radar = new RadarMap();
+                    radar.selectionListener = (tileX, tileY) -> {
+                        if(selectedTileX == tileX && selectedTileY == tileY){
+                            selectedTileX = -1;
+                            selectedTileY = -1;
+                        }else{
+                            selectedTileX = tileX;
+                            selectedTileY = tileY;
+                        }
+                        refresh();
+                    };
+                    panel.add(radar).size(mapSize, mapSize);
                     panel.row();
-                    panel.add(legend()).color(Color.lightGray).left().growX().get();
+                    Label key = panel.add(legend()).color(Color.lightGray).left().width(contentWidth).get();
+                    key.setWrap(true);
                 }).marginTop(Scl.scl(6f)).marginRight(offset);
 
                 t.update(() -> {
@@ -141,13 +184,16 @@ public class CampaignThreatRadar extends Mod{
 
     /** Legend shown under the tactical mini map. */
     public static String legend(){
-        return "[lightgray]◆[accent] ядро  [lightgray]✚[yellow] усилить  [lightgray]□[scarlet] спавн  [lightgray]●[scarlet] враг  [lightgray]●[orange] авиация  [lightgray]◉[scarlet] босс[]";
+        return "[lightgray]◆[accent] ядро  [lightgray]✚[yellow] усилить  [lightgray]□[scarlet] спавн  [lightgray]●[scarlet] враг  [lightgray]●[orange] авиация  [lightgray]◉[scarlet] босс[]\n" +
+                "[lightgray]Клик по карте — выбрать участок · план не строит автоматически[]";
     }
 
     private void refresh(){
         if(status == null) return;
         if(Vars.state == null || !Vars.state.isGame() || Vars.player == null || !Vars.player.isAdded()){
             status.setText(format(false, null));
+            selectedTileX = -1;
+            selectedTileY = -1;
             if(radar != null) radar.clear();
             return;
         }
@@ -294,8 +340,184 @@ public class CampaignThreatRadar extends Mod{
 
         Prediction prediction = compute(units, cores, base, buildWaveInfo(enemy), HORIZON_SECONDS);
 
-        status.setText(format(true, prediction));
-        updateRadar(prediction, cores);
+        DefensePlan defensePlan = selectedTileX >= 0 && selectedTileY >= 0
+                ? buildDefensePlan(selectedTileX, selectedTileY, prediction) : null;
+        String briefing = format(true, prediction);
+        if(defensePlan != null) briefing += "\n" + formatDefensePlan(defensePlan);
+        status.setText(briefing);
+        updateRadar(prediction, cores, defensePlan);
+    }
+
+    private static final int SITE_FREE = 0;
+    private static final int SITE_OCCUPIED = 1;
+    private static final int SITE_WATER = 2;
+    private static final int SITE_OUTSIDE = 3;
+
+    /** Creates a compact blueprint oriented toward the nearest real approach. */
+    private DefensePlan buildDefensePlan(int tileX, int tileY, Prediction prediction){
+        DefensePlan plan = new DefensePlan();
+        plan.centerTileX = tileX;
+        plan.centerTileY = tileY;
+
+        float centerX = (tileX + 0.5f) * TILE_SIZE;
+        float centerY = (tileY + 0.5f) * TILE_SIZE;
+        PointInfo nearestSpawn = null;
+        float nearestDst2 = Float.MAX_VALUE;
+        if(prediction.spawns != null){
+            for(PointInfo spawn : prediction.spawns){
+                if(spawn == null) continue;
+                float dx = spawn.x - centerX;
+                float dy = spawn.y - centerY;
+                float dst2 = dx * dx + dy * dy;
+                if(dst2 < nearestDst2){
+                    nearestSpawn = spawn;
+                    nearestDst2 = dst2;
+                }
+            }
+        }
+        float approachX = nearestSpawn == null ? 0f : nearestSpawn.x - centerX;
+        float approachY = nearestSpawn == null ? 1f : nearestSpawn.y - centerY;
+        if(nearestSpawn == null && prediction.blips != null && prediction.blips.size > 0){
+            Blip nearestEnemy = null;
+            nearestDst2 = Float.MAX_VALUE;
+            for(Blip blip : prediction.blips){
+                if(blip == null) continue;
+                float dx = blip.x - centerX;
+                float dy = blip.y - centerY;
+                float dst2 = dx * dx + dy * dy;
+                if(dst2 < nearestDst2){
+                    nearestEnemy = blip;
+                    nearestDst2 = dst2;
+                }
+            }
+            if(nearestEnemy != null){
+                approachX = nearestEnemy.x - centerX;
+                approachY = nearestEnemy.y - centerY;
+            }
+        }
+        int directionIndex = Math.round((float)(Math.atan2(approachY, approachX) / (Math.PI / 4.0)));
+        directionIndex = ((directionIndex % 8) + 8) % 8;
+        int[][] vectors = {{1, 0}, {1, 1}, {0, 1}, {-1, 1}, {-1, 0}, {-1, -1}, {0, -1}, {1, -1}};
+        plan.frontX = vectors[directionIndex][0];
+        plan.frontY = vectors[directionIndex][1];
+        plan.direction = directionName(plan.frontX, plan.frontY);
+
+        Seq<PlanPlacement> wanted = defenseLayout(tileX, tileY, plan.frontX, plan.frontY);
+        plan.total = wanted.size;
+        for(PlanPlacement target : wanted){
+            int reason = classifyBuildSite(target.x, target.y);
+            int placeX = target.x, placeY = target.y;
+            boolean adjusted = false;
+            if(reason != SITE_FREE){
+                PlanPlacement alternative = nearestFreeSite(target.x, target.y, wanted, plan.placements);
+                if(alternative != null){
+                    placeX = alternative.x;
+                    placeY = alternative.y;
+                    adjusted = true;
+                }
+            }
+            if(reason == SITE_FREE || adjusted){
+                PlanPlacement placement = new PlanPlacement(target.kind, placeX, placeY);
+                placement.requestedX = target.x;
+                placement.requestedY = target.y;
+                placement.adjusted = adjusted;
+                plan.placements.add(placement);
+                if(adjusted) plan.adjusted++;
+            }else if(reason == SITE_WATER){
+                plan.water++;
+            }else if(reason == SITE_OUTSIDE){
+                plan.outside++;
+            }else{
+                plan.occupied++;
+            }
+        }
+        return plan;
+    }
+
+    /** Seven front/flank walls, four Duo, two Scatter and one Mender. */
+    private static Seq<PlanPlacement> defenseLayout(int tileX, int tileY, int frontX, int frontY){
+        int sideX = -frontY;
+        int sideY = frontX;
+        Seq<PlanPlacement> result = new Seq<>();
+        for(int side = -2; side <= 2; side++) addPlanSlot(result, PLAN_WALL, tileX, tileY, frontX, frontY, sideX, sideY, 2, side);
+        addPlanSlot(result, PLAN_WALL, tileX, tileY, frontX, frontY, sideX, sideY, 1, -2);
+        addPlanSlot(result, PLAN_WALL, tileX, tileY, frontX, frontY, sideX, sideY, 1, 2);
+        addPlanSlot(result, PLAN_DUO, tileX, tileY, frontX, frontY, sideX, sideY, 0, -1);
+        addPlanSlot(result, PLAN_DUO, tileX, tileY, frontX, frontY, sideX, sideY, 0, 1);
+        addPlanSlot(result, PLAN_DUO, tileX, tileY, frontX, frontY, sideX, sideY, -1, -1);
+        addPlanSlot(result, PLAN_DUO, tileX, tileY, frontX, frontY, sideX, sideY, -1, 1);
+        addPlanSlot(result, PLAN_SCATTER, tileX, tileY, frontX, frontY, sideX, sideY, -2, -1);
+        addPlanSlot(result, PLAN_SCATTER, tileX, tileY, frontX, frontY, sideX, sideY, -2, 1);
+        addPlanSlot(result, PLAN_MENDER, tileX, tileY, frontX, frontY, sideX, sideY, -1, 0);
+        return result;
+    }
+
+    private static void addPlanSlot(Seq<PlanPlacement> result, int kind, int tileX, int tileY,
+                                    int frontX, int frontY, int sideX, int sideY, int forward, int lateral){
+        result.add(new PlanPlacement(kind,
+                tileX + frontX * forward + sideX * lateral,
+                tileY + frontY * forward + sideY * lateral));
+    }
+
+    /** Returns the terrain/building reason a blueprint tile cannot be used. */
+    private int classifyBuildSite(int tileX, int tileY){
+        if(Vars.world == null || tileX < 0 || tileY < 0
+                || tileX >= Vars.world.width() || tileY >= Vars.world.height()) return SITE_OUTSIDE;
+        Tile tile = Vars.world.tile(tileX, tileY);
+        if(tile == null) return SITE_OUTSIDE;
+        if(tile.floor() != null && tile.floor().isLiquid) return SITE_WATER;
+        return tile.block() == Blocks.air ? SITE_FREE : SITE_OCCUPIED;
+    }
+
+    /** Searches two tile rings, preserving the remaining exact blueprint slots. */
+    private PlanPlacement nearestFreeSite(int tileX, int tileY, Seq<PlanPlacement> wanted, Seq<PlanPlacement> used){
+        for(int distance = 1; distance <= 2; distance++){
+            for(int dx = -distance; dx <= distance; dx++){
+                int dyAbs = distance - Math.abs(dx);
+                if(dyAbs == 0){
+                    PlanPlacement found = freeAlternative(tileX + dx, tileY, wanted, used);
+                    if(found != null) return found;
+                }else{
+                    PlanPlacement found = freeAlternative(tileX + dx, tileY - dyAbs, wanted, used);
+                    if(found != null) return found;
+                    found = freeAlternative(tileX + dx, tileY + dyAbs, wanted, used);
+                    if(found != null) return found;
+                }
+            }
+        }
+        return null;
+    }
+
+    private PlanPlacement freeAlternative(int tileX, int tileY, Seq<PlanPlacement> wanted, Seq<PlanPlacement> used){
+        if(containsTile(wanted, tileX, tileY) || containsTile(used, tileX, tileY)
+                || classifyBuildSite(tileX, tileY) != SITE_FREE) return null;
+        return new PlanPlacement(PLAN_WALL, tileX, tileY);
+    }
+
+    private static boolean containsTile(Seq<PlanPlacement> placements, int tileX, int tileY){
+        for(PlanPlacement placement : placements){
+            if(placement.x == tileX && placement.y == tileY) return true;
+        }
+        return false;
+    }
+
+    /** Three-line, plain-language output: blueprint, fit against terrain, and no auto-build. */
+    private static String formatDefensePlan(DefensePlan plan){
+        StringBuilder text = new StringBuilder("[gold]🛡 План защиты · участок ")
+                .append(plan.centerTileX).append(',').append(plan.centerTileY)
+                .append(" · фронт ").append(plan.direction).append("[]\n")
+                .append("[lightgray]□ 7 медных стен[] · [orange]● 4 Duo[] · [accent]○ 2 Scatter[] · [green]✚ 1 Mender[] (")
+                .append(plan.total).append(" мест)[]\n");
+        StringBuilder detail = new StringBuilder("Местность: доступно ")
+                .append(plan.placements.size).append('/').append(plan.total);
+        if(plan.adjusted > 0) detail.append(" · сдвинуто ").append(plan.adjusted);
+        if(plan.occupied > 0) detail.append(" · занято ").append(plan.occupied);
+        if(plan.water > 0) detail.append(" · вода ").append(plan.water);
+        if(plan.outside > 0) detail.append(" · край карты ").append(plan.outside);
+        detail.append(" · только рекомендация");
+        text.append(plan.placements.size == plan.total ? "[green]" : "[orange]")
+                .append(detail).append("[]");
+        return text.toString();
     }
 
     /**
@@ -411,9 +633,12 @@ public class CampaignThreatRadar extends Mod{
     }
 
     /** Feeds the whole-map mini map with the freshly computed data. */
-    private void updateRadar(Prediction prediction, Seq<CoreInfo> cores){
+    private void updateRadar(Prediction prediction, Seq<CoreInfo> cores, DefensePlan defensePlan){
         if(radar == null) return;
         radar.clear();
+        radar.selectedTileX = selectedTileX;
+        radar.selectedTileY = selectedTileY;
+        radar.defensePlan = defensePlan;
 
         if(prediction.spawns != null) radar.spawns.addAll(prediction.spawns);
         if(prediction.weakPoints != null) radar.weakPoints.addAll(prediction.weakPoints);
@@ -581,6 +806,29 @@ public class CampaignThreatRadar extends Mod{
         /** How much is missing here: DPS, air DPS and wall HP. */
         public float needGround, needAir, needWall;
         public int wallCount, turretCount, tileX, tileY;
+    }
+
+    /** A selected site and its compact, terrain-checked defense blueprint. */
+    public static class DefensePlan{
+        public int centerTileX, centerTileY, frontX, frontY;
+        public int total, adjusted, occupied, water, outside;
+        public String direction = "";
+        /** Only buildable proposed cells; blocked cells are counted separately. */
+        public Seq<PlanPlacement> placements = new Seq<>();
+    }
+
+    /** One proposed cell on the tactical-map blueprint. */
+    public static class PlanPlacement{
+        public int kind, x, y, requestedX, requestedY;
+        public boolean adjusted;
+
+        public PlanPlacement(int kind, int x, int y){
+            this.kind = kind;
+            this.x = x;
+            this.y = y;
+            this.requestedX = x;
+            this.requestedY = y;
+        }
     }
 
     /** A concrete instruction for one weak point: what to build and how much. */
@@ -1364,164 +1612,161 @@ public class CampaignThreatRadar extends Mod{
         return marker;
     }
 
-    /** Formats the panel text. */
+    /** Formats a compact, plain-language tactical briefing for the HUD. */
     public static String format(boolean inGame, Prediction p){
         if(!inGame || p == null){
-            return "[gold]РАДАР КАМПАНИИ[]\n[gray]Неактивен вне игры[]";
+            return "[gold]РАДАР[]\n[gray]Неактивен вне игры — запустите бой, чтобы увидеть угрозы[]";
         }
 
         StringBuilder text = new StringBuilder();
-        text.append("[gold]РАДАР КАМПАНИИ[] [lightgray]v1.5[]\n");
-
-        // --- wave status -----------------------------------------------------
+        StringBuilder header = new StringBuilder("[gold]РАДАР[]");
         if(p.hasWaves && p.wave > 0){
-            text.append("[accent]🌊 Волна ").append(p.wave).append("[]");
-            if(p.winWave > 0){
-                text.append("[lightgray]/").append(p.winWave).append("[]");
-            }
-            if(p.waveInProgress){
-                text.append(" [orange]· бой[]");
-            }
+            header.append(" [lightgray]·[] [accent]Волна ").append(p.wave).append("[]");
+            if(p.winWave > 0) header.append("[lightgray]/").append(p.winWave).append("[]");
+            if(p.waveInProgress) header.append(" [orange]· идёт бой[]");
             if(p.waveTimeSec >= 0f){
-                text.append(" [lightgray]· след. через ").append(fmtTime(p.waveTimeSec)).append("[]");
+                header.append(" [lightgray]· следующая через ").append(fmtTime(p.waveTimeSec)).append("[]");
             }else if(!p.waveInProgress){
-                text.append(" [lightgray]· след. по кнопке[]");
+                header.append(" [lightgray]· запуск вручную[]");
             }
-            text.append('\n');
         }
+        appendLine(text, header.toString());
 
-        // --- enemies on the map ----------------------------------------------
-        text.append("[white]👾[accent] ").append(p.count).append("[]");
         if(p.count > 0){
-            text.append(" [lightgray]🚜").append(p.groundCount).append(" 🛸").append(p.flyingCount).append("[]");
-            if(p.bossCount > 0){
-                text.append(" [scarlet]💀").append(p.bossCount).append("[]");
-            }
-            text.append(" [lightgray]ΣHP ~").append(fmtAmount(p.totalEnemyHp))
-                    .append(" · ").append((int)p.totalEnemyDps).append("/с");
+            StringBuilder enemyLine = new StringBuilder("[white]Враги: ").append(p.count)
+                    .append(" (земля ").append(p.groundCount).append(", авиация ").append(p.flyingCount);
+            if(p.bossCount > 0) enemyLine.append(", боссы ").append(p.bossCount);
+            appendLine(text, enemyLine.append(")[]").toString());
+
+            StringBuilder strengthLine = new StringBuilder("[lightgray]Сила: HP ~")
+                    .append(fmtAmount(p.totalEnemyHp)).append(" · урон ")
+                    .append((int)p.totalEnemyDps).append("/с");
             if(p.nearestTiles < Float.MAX_VALUE){
-                text.append(" · ближ. ").append((int)(p.nearestTiles + 0.5f)).append(" бл.");
+                strengthLine.append(" · ближайший ").append(Math.round(p.nearestTiles)).append(" тайлов");
             }
-            text.append("[]\n");
+            appendLine(text, strengthLine.append("[]").toString());
         }
 
-        if(p.bossCount > 0 && p.bossNames.size > 0){
-            text.append("[scarlet]💀 БОСС: ").append(p.bossNames.toString(", ")).append("[]\n");
-        }
-
-        // --- the attack that is coming right now ------------------------------
+        // One clear line for the most relevant current engagement.
         if(p.threats > 0 && p.directEta < Float.MAX_VALUE){
-            text.append("[scarlet]⚠️ ПРОРЫВ ").append(p.threats).append(" к ядру · ETA ")
-                    .append(etaSeconds(p.directEtaLow)).append("–").append(etaSeconds(p.directEtaHigh)).append("с[]\n");
+            StringBuilder danger = new StringBuilder("[scarlet]⚠️ К ядру идут ").append(p.threats)
+                    .append(" · прибытие ").append(etaSeconds(p.directEtaLow)).append('–')
+                    .append(etaSeconds(p.directEtaHigh)).append(" с");
+            if(p.coreDeath < Float.MAX_VALUE){
+                danger.append(" · ядро может пасть через ~").append(Math.round(p.coreDeath)).append(" с");
+            }
+            appendLine(text, danger.append("[]").toString());
         }else if(p.closeThreats > 0){
-            text.append("[crimson]🚨 Враг у ядра[]\n");
-        }else if(p.count > 0 && p.eta < Float.MAX_VALUE){
-            text.append("[orange]🟠 Обход · ETA ")
-                    .append(etaSeconds(p.etaLow)).append("–").append(etaSeconds(p.etaHigh)).append("с[]\n");
-        }
-
-        // --- the fight in the next minute, in one line -----------------------
-        if(p.incoming > 0){
-            StringBuilder battle = new StringBuilder();
-            battle.append("⚔ ").append((int)HORIZON_SECONDS).append("с: ").append(p.incoming).append(' ')
-                    .append(foeWord(p.incoming)).append(" · ").append((int)p.incomingDps).append("/с");
+            appendLine(text, "[crimson]🚨 Враг уже у ядра[]");
+        }else if(p.incoming > 0){
+            StringBuilder battle = new StringBuilder("⚔ За ").append((int)HORIZON_SECONDS).append(" с: ")
+                    .append(p.incoming).append(' ').append(foeWord(p.incoming))
+                    .append(" · урон ").append((int)p.incomingDps).append("/с");
             if(p.defenseDps > 0f){
-                battle.append(" · оборона ").append((int)p.defenseDps).append("/с");
+                battle.append(" · защита ").append((int)p.defenseDps).append("/с");
             }else{
-                battle.append(" · обороны нет");
+                battle.append(" · защиты нет");
             }
             if(p.coreDeath < Float.MAX_VALUE){
-                text.append("[crimson]").append(battle).append(" → ядро за ~")
-                        .append((int)p.coreDeath).append("с[]\n");
+                battle.append(" · ядро через ~").append(Math.round(p.coreDeath)).append(" с");
             }else if(p.defenseDps > 0f){
-                text.append("[green]").append(battle).append(" → отобьём[]\n");
-            }else{
-                text.append("[orange]").append(battle).append("[]\n");
+                battle.append(" · отбиваем");
             }
+            appendLine(text, (p.coreDeath < Float.MAX_VALUE ? "[crimson]" : "[orange]")
+                    + battle + "[]");
+        }else if(p.count > 0 && p.eta < Float.MAX_VALUE){
+            appendLine(text, "[orange]🟠 Враг идёт в обход · прибытие "
+                    + etaSeconds(p.etaLow) + "–" + etaSeconds(p.etaHigh) + " с[]");
         }
 
-        // --- what to improve: the answer to "where do I build next?" ---------
-        if(p.weakPoints != null && p.weakPoints.size > 0){
-            text.append("[gold]🎯 УЛУЧШИТЬ:[]\n");
-            for(int i = 0; i < p.weakPoints.size; i++){
-                WeakPoint wp = p.weakPoints.get(i);
-                Advice advice = adviceFor(wp);
-                // The number is red when the spot is critical, the action word
-                // keeps the colour the map marker has.
-                text.append(wp.severity >= 0.65f ? "[crimson]" : "[lightgray]")
-                        .append(i + 1).append(")[] [").append(advice.color).append(']').append(advice.action)
-                        .append("[lightgray] · ").append(wp.direction).append(' ')
-                        .append(wp.tileX).append(',').append(wp.tileY)
-                        .append(" — ").append(advice.detail).append("[]\n");
+        // Show the two most useful build locations. Any additional places stay
+        // visible on the map, identified by their ✚ markers.
+        int shownWeakPoints = p.weakPoints == null ? 0 : Math.min(2, p.weakPoints.size);
+        for(int i = 0; i < shownWeakPoints; i++){
+            WeakPoint wp = p.weakPoints.get(i);
+            Advice advice = adviceFor(wp);
+            StringBuilder actionLine = new StringBuilder();
+            if(i == 0) actionLine.append("[gold]🎯 Что улучшить:[] ");
+            actionLine.append(wp.severity >= 0.65f ? "[crimson]" : "[lightgray]")
+                    .append(i + 1).append(")[] [").append(advice.color).append(']')
+                    .append(advice.action).append("[] [lightgray]· ")
+                    .append(wp.direction).append(' ').append(wp.tileX).append(',').append(wp.tileY)
+                    .append(" — ").append(compactAdviceDetail(wp, advice));
+            if(i == shownWeakPoints - 1 && p.weakPoints.size > shownWeakPoints){
+                actionLine.append(" · ещё ").append(p.weakPoints.size - shownWeakPoints)
+                        .append(" место ✚ на карте");
             }
+            appendLine(text, actionLine.append("[]").toString());
         }
 
-        // --- how long the base holds ----------------------------------------
         WaveForecast fc = p.forecast;
         if(fc != null && fc.available){
+            String reasonText = switch(fc.reason){
+                case "ground" -> "наземка";
+                case "air" -> "авиация";
+                case "boss" -> "босс";
+                case "no-ground" -> "нет урона по земле";
+                case "no-air" -> "нет ПВО";
+                case "no-defense" -> "нет обороны";
+                default -> "";
+            };
             if(fc.fallWave > 0){
-                String reasonText = switch(fc.reason){
-                    case "ground" -> "пробьёт наземка";
-                    case "air" -> "пробьёт авиация";
-                    case "boss" -> "убьёт босс";
-                    case "no-ground" -> "нет урона по земле";
-                    case "no-air" -> "нет ПВО";
-                    case "no-defense" -> "обороны нет";
-                    default -> "";
-                };
                 if(p.wave > 0 && fc.fallWave <= p.wave){
-                    text.append("[crimson]🏰 эта волна может быть последней — ").append(reasonText).append("[]\n");
+                    appendLine(text, "[crimson]🏰 Эта волна может быть последней"
+                            + (reasonText.isEmpty() ? "" : " — " + reasonText) + "[]");
+                }else if(fc.wavesLeft <= 0){
+                    appendLine(text, "[crimson]🏰 Оборона не выдержит следующую волну"
+                            + (reasonText.isEmpty() ? "" : " · причина: " + reasonText) + "[]");
                 }else{
-                    text.append(fc.wavesLeft <= 1 ? "[crimson]" : (fc.wavesLeft <= 4 ? "[orange]" : "[yellow]"))
-                            .append("🏰 ещё ~").append(fc.wavesLeft).append(' ').append(waveWord(fc.wavesLeft))
-                            .append(" · свалится на ~").append(fc.fallWave).append("-й — ")
-                            .append(reasonText).append("[]\n");
+                    String color = fc.wavesLeft <= 1 ? "[crimson]" : (fc.wavesLeft <= 4 ? "[orange]" : "[yellow]");
+                    appendLine(text, color + "🏰 Оборона выдержит ~" + fc.wavesLeft + ' '
+                            + waveWord(fc.wavesLeft) + " · риск на ~" + fc.fallWave + "-й"
+                            + (reasonText.isEmpty() ? "" : ": " + reasonText) + "[]");
                 }
             }else if(fc.cappedByWin){
-                text.append("[green]🏰 дотянет до победы (волна ").append(p.winWave).append(") ✅[]\n");
+                appendLine(text, "[green]🏰 Оборона выдержит до победы (волна " + p.winWave + ") ✅[]");
             }else if(fc.wavesLeft > 0){
-                text.append("[green]🏰 держится ещё ").append(fc.wavesLeft).append("+ волн[]\n");
+                appendLine(text, "[green]🏰 Оборона держится ещё " + fc.wavesLeft + "+ волн[]");
             }
         }
 
-        // --- the next wave, so it can be prepared for ------------------------
         if(p.nextWave != null){
             WaveLoad nw = p.nextWave;
-            text.append("[lightgray]🌊 след. волна ").append(nw.wave).append(": ").append(nw.count)
-                    .append(' ').append(foeWord(nw.count))
-                    .append(" · ΣHP ~").append(fmtAmount(nw.totalHp))
-                    .append(" · ").append((int)nw.totalDps).append("/с");
-            if(nw.bossCount > 0) text.append(" · 💀").append(nw.bossCount);
+            StringBuilder next = new StringBuilder("[lightgray]Следующая волна ").append(nw.wave)
+                    .append(": ").append(nw.count).append(' ').append(foeWord(nw.count));
             if(nw.composition != null && !nw.composition.isEmpty()){
-                text.append(" · ").append(nw.composition);
+                next.append(" · ").append(nw.composition);
+            }else{
+                next.append(" · HP ~").append(fmtAmount(nw.totalHp));
             }
-            text.append("[]\n");
+            appendLine(text, next.append("[]").toString());
         }
         if(fc != null && fc.available && fc.nextBossWave > 0 && fc.nextBossIn > 0 && fc.nextBossIn <= 10
                 && p.bossCount == 0 && (p.nextWave == null || p.nextWave.wave != fc.nextBossWave)){
-            text.append("[scarlet]💀 босс/гардиан на волне ").append(fc.nextBossWave)
-                    .append(" (через ").append(fc.nextBossIn).append(' ').append(waveWord(fc.nextBossIn)).append(")[]\n");
+            appendLine(text, "[scarlet]💀 Босс на волне " + fc.nextBossWave + " · через "
+                    + fc.nextBossIn + ' ' + waveWord(fc.nextBossIn) + "[]");
         }
 
-        // --- problems that need a reaction right now -------------------------
+        // Bundle urgent base diagnostics into one readable line instead of a
+        // separate row for every counter.
+        StringBuilder diagnostics = new StringBuilder();
         if(p.minCoreHp < 99f){
-            int hp = (int)p.minCoreHp;
-            text.append(hp <= 35 ? "[crimson]🚨 Ядро: " : "[coral]⚠️ Ядро: ").append(hp).append("% HP[]\n");
+            diagnostics.append("Ядро: HP ").append(Math.round(p.minCoreHp)).append('%');
         }
-
-        if(p.blackout){
-            text.append("[scarlet]⚡ Сеть обесточена (").append((int)p.powerNet).append("/с)[]\n");
-        }else if(p.powerDeficit){
-            text.append("[coral]⚡ Дефицит ").append((int)p.powerNet).append("/с · АКБ ")
-                    .append((int)p.battery).append('%');
-            if(p.batterySeconds < Float.MAX_VALUE){
-                text.append(" (~").append(fmtTime(p.batterySeconds)).append(')');
+        if(p.hasPower){
+            if(p.blackout){
+                appendDiagnostic(diagnostics, "⚡ Электросеть отключена");
+            }else if(p.powerDeficit){
+                StringBuilder energy = new StringBuilder("⚡ Энергия: не хватает ")
+                        .append(Math.abs(Math.round(p.powerNet))).append("/с · батарея ")
+                        .append(Math.round(p.battery)).append('%');
+                if(p.batterySeconds < Float.MAX_VALUE){
+                    energy.append(" (~").append(fmtTime(p.batterySeconds)).append(')');
+                }
+                appendDiagnostic(diagnostics, energy.toString());
             }
-            text.append("[]\n");
         }
 
-        // The ammo and the damage counts are only repeated when the advice list
-        // does not already point at the exact building.
         boolean adviceHasSupply = false, adviceHasRepair = false;
         if(p.weakPoints != null){
             for(WeakPoint wp : p.weakPoints){
@@ -1529,57 +1774,50 @@ public class CampaignThreatRadar extends Mod{
                 if(wp.kind == MARKER_REPAIR) adviceHasRepair = true;
             }
         }
-        StringBuilder trouble = new StringBuilder();
         if(p.emptyTurrets > 0 && !adviceHasSupply){
-            trouble.append("📦 без патронов ").append(p.emptyTurrets);
+            appendDiagnostic(diagnostics, "📦 Турели без патронов: " + p.emptyTurrets);
         }
         if(p.damagedBuildings >= 3 && !adviceHasRepair){
-            if(trouble.length() > 0) trouble.append(" · ");
-            trouble.append("🛠️ повреждено ").append(p.damagedBuildings);
+            appendDiagnostic(diagnostics, "🛠 Повреждено построек: " + p.damagedBuildings);
         }
-        if(trouble.length() > 0){
-            text.append("[yellow]").append(trouble).append("[]\n");
-        }
-
-        // --- base at a glance ------------------------------------------------
-        StringBuilder baseLine = new StringBuilder();
-        if(p.turretCount > 0) baseLine.append("турелей ").append(p.turretCount);
-        if(p.defenseDps > 0f){
-            if(baseLine.length() > 0) baseLine.append(" · ");
-            baseLine.append("🛡").append((int)p.defenseDps).append("/с");
-        }
-        if(p.ownCount > 0){
-            if(baseLine.length() > 0) baseLine.append(" · ");
-            baseLine.append("🤖").append(p.ownCount);
-        }
-        if(p.hasPower && !p.powerDeficit){
-            if(baseLine.length() > 0) baseLine.append(" · ");
-            baseLine.append("⚡").append(p.powerNet >= 0f ? "+" : "").append((int)p.powerNet).append("/с");
-        }
-        if(p.coreItems >= 0){
-            if(baseLine.length() > 0) baseLine.append(" · ");
-            baseLine.append("📦").append(fmtAmount(p.coreItems));
-        }
-        if(baseLine.length() > 0){
-            text.append("[lightgray]🏭 ").append(baseLine).append("[]\n");
+        if(diagnostics.length() > 0){
+            String diagnosticColor = p.blackout || p.minCoreHp <= 35f ? "[scarlet]" : "[yellow]";
+            appendLine(text, diagnosticColor + "⚠ " + diagnostics + "[]");
         }
 
-        // --- all quiet --------------------------------------------------------
-        boolean hasAlerts = p.threats > 0 || p.closeThreats > 0 || p.bossCount > 0 || p.incoming > 0 ||
-                p.minCoreHp < 99f || p.powerDeficit ||
-                (p.forecast != null && p.forecast.fallWave > 0 && p.forecast.wavesLeft <= 1) ||
-                (p.weakPoints != null && p.weakPoints.size > 0) ||
-                p.emptyTurrets > 0 || p.damagedBuildings >= 3;
+        boolean hasAlerts = p.threats > 0 || p.closeThreats > 0 || p.bossCount > 0 || p.incoming > 0
+                || p.minCoreHp < 99f || p.powerDeficit
+                || (fc != null && fc.fallWave > 0 && fc.wavesLeft <= 1)
+                || (p.weakPoints != null && p.weakPoints.size > 0)
+                || p.emptyTurrets > 0 || p.damagedBuildings >= 3;
         if(!hasAlerts && p.count == 0){
-            text.append("[green]✅ Всё стабильно[]");
-        }
-
-        // Remove trailing newline if any
-        if(text.charAt(text.length() - 1) == '\n'){
-            text.setLength(text.length() - 1);
+            appendLine(text, "[green]✅ Всё спокойно — угроз нет, база в порядке[]");
         }
 
         return text.toString();
+    }
+
+    private static void appendLine(StringBuilder text, String line){
+        if(text.length() > 0) text.append('\n');
+        text.append(line);
+    }
+
+    private static void appendDiagnostic(StringBuilder diagnostics, String value){
+        if(diagnostics.length() > 0) diagnostics.append(" · ");
+        diagnostics.append(value);
+    }
+
+    private static String compactAdviceDetail(WeakPoint wp, Advice advice){
+        if(wp == null) return advice == null ? "" : advice.detail;
+        return switch(wp.kind){
+            case MARKER_AIR -> wp.airDps > 0f
+                    ? "нужно +" + fmtAmount(wp.needAir) + " урона/с по воздуху"
+                    : "нет защиты от авиации";
+            case MARKER_WALL -> "нужно +" + fmtAmount(wp.needWall) + " HP стен";
+            case MARKER_SUPPLY -> "нет патронов";
+            case MARKER_REPAIR -> "осталось " + Math.round(wp.healthPct) + "% HP";
+            default -> "нужно +" + fmtAmount(wp.needGround) + " урона/с";
+        };
     }
 
     /** Russian plural of "враг": враг / врага / врагов. */

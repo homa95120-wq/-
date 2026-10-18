@@ -2,12 +2,9 @@
  * Campaign Threat Radar (ZIP) - script version of campaignradar.CampaignThreatRadar.
  *
  * Client-only HUD tactical radar for Mindustry v8 (build 154+).
- * Shows enemy unit counts (ground/flying/bosses) with total HP/DPS, a small
- * tactical mini map with every enemy unit around your core, predicted approach
- * ETA to cores, core health, power deficit, turret ammo alerts, defense
- * diagnostics, base and session statistics, a short forecast of what is going
- * to happen in the next minutes and a wave survival forecast: how many of the
- * coming waves (from the real spawn rules) your current defence can hold.
+ * Shows enemy counts and threat ETAs, a responsive whole-map tactical view,
+ * the two most important places to improve, urgent core/power diagnostics,
+ * a concise wave forecast, and a clickable terrain-aware defence planner.
  *
  * Positioned at top-right, to the left of the vanilla minimap.
  * Uses `hidden: true` so it never affects multiplayer server compatibility.
@@ -21,8 +18,11 @@ var TOWARDS_CORE_DOT = 0.25; // velocity/direction cosine above which a unit cou
 var CLOSE_DISTANCE = 320; // 40 tiles (8 units per tile)
 var TILE_SIZE = 8; // world units per tile
 var MINIMAP_WIDTH = 150; // width of the vanilla minimap in UI units
-var MINIMAP_GAP = 70; // gap between the vanilla minimap and this panel, in UI units
-var RADAR_SIZE = 160; // side of the tactical mini map, in UI units
+var MINIMAP_GAP = 40; // clear gap between the minimap and this panel, in UI units
+var PANEL_WIDTH = 390; // maximum content width; responsive on narrow screens
+var RADAR_SIZE = 220; // maximum side of the tactical whole-map view, in UI units
+var RADAR_HEIGHT_FRACTION = 0.26; // map uses at most 26% of screen height
+var PANEL_WIDTH_FRACTION = 0.38; // panel stays below 40% of screen width
 var RADAR_RANGE_TILES = 120; // legacy/local fallback radius when the world size is unknown, in tiles
 var DEFENSE_RING_TILES = 26; // distance from a core where an approaching wave should meet the defence
 var WEAK_POINT_MAX = 3; // maximum number of "improve defence here" markers
@@ -43,6 +43,11 @@ var MARKER_AIR = 1; // weak-point kind: not enough anti-air damage
 var MARKER_WALL = 2; // weak-point kind: not enough wall HP in front of the turrets
 var MARKER_SUPPLY = 3; // weak-point kind: a nearby turret has no ammo
 var MARKER_REPAIR = 4; // weak-point kind: front-line buildings are badly damaged
+
+var PLAN_WALL = 0; // blueprint marker: copper wall
+var PLAN_DUO = 1; // blueprint marker: Duo turret
+var PLAN_SCATTER = 2; // blueprint marker: Scatter anti-air turret
+var PLAN_MENDER = 3; // blueprint marker: Mender repair turret
 
 // ---------------------------------------------------------------- logic
 
@@ -150,6 +155,183 @@ function directionName(dx, dy) {
     var index = Math.round(Math.atan2(dy, dx) / (Math.PI / 4));
     index = ((index % 8) + 8) % 8;
     return names[index];
+}
+
+/**
+ * Selects the approach direction for a site: nearest wave spawn, otherwise
+ * nearest visible enemy. The returned vector is snapped to one of eight compass
+ * directions so the compact blueprint stays on whole tiles.
+ */
+function defenseFront(tileX, tileY, spawns, enemies) {
+    var centerX = (tileX + 0.5) * TILE_SIZE;
+    var centerY = (tileY + 0.5) * TILE_SIZE;
+    var source = null;
+    var bestDst2 = Infinity;
+    var candidates = spawns && spawns.length ? spawns : (enemies || []);
+    for (var i = 0; i < candidates.length; i++) {
+        var point = candidates[i];
+        if (!point || !isFinite(point.x) || !isFinite(point.y)) continue;
+        var dx = point.x - centerX;
+        var dy = point.y - centerY;
+        var dst2 = dx * dx + dy * dy;
+        if (dst2 < bestDst2) {
+            source = point;
+            bestDst2 = dst2;
+        }
+    }
+    var vx = source ? source.x - centerX : 0;
+    var vy = source ? source.y - centerY : 1;
+    var index = Math.round(Math.atan2(vy, vx) / (Math.PI / 4));
+    index = ((index % 8) + 8) % 8;
+    var vectors = [[1, 0], [1, 1], [0, 1], [-1, 1], [-1, 0], [-1, -1], [0, -1], [1, -1]];
+    return {
+        dx: vectors[index][0],
+        dy: vectors[index][1],
+        direction: directionName(vectors[index][0], vectors[index][1]),
+        source: source ? (spawns && spawns.length ? "spawn" : "enemy") : "default"
+    };
+}
+
+/** Returns the compact 5-by-5 defensive blueprint in tile coordinates. */
+function defenseLayout(tileX, tileY, frontX, frontY) {
+    frontX = frontX > 0 ? 1 : (frontX < 0 ? -1 : 0);
+    frontY = frontY > 0 ? 1 : (frontY < 0 ? -1 : 0);
+    if (frontX === 0 && frontY === 0) frontY = 1;
+    var sideX = -frontY;
+    var sideY = frontX;
+    var placements = [];
+    function add(kind, forward, lateral) {
+        placements.push({
+            kind: kind,
+            x: tileX + frontX * forward + sideX * lateral,
+            y: tileY + frontY * forward + sideY * lateral
+        });
+    }
+
+    // Seven walls make a short front and two flanks; turrets stay behind them.
+    for (var side = -2; side <= 2; side++) add(PLAN_WALL, 2, side);
+    add(PLAN_WALL, 1, -2);
+    add(PLAN_WALL, 1, 2);
+    // Four all-round Duo turrets, two anti-air Scatters and a central Mender.
+    add(PLAN_DUO, 0, -1);
+    add(PLAN_DUO, 0, 1);
+    add(PLAN_DUO, -1, -1);
+    add(PLAN_DUO, -1, 1);
+    add(PLAN_SCATTER, -2, -1);
+    add(PLAN_SCATTER, -2, 1);
+    add(PLAN_MENDER, -1, 0);
+    return placements;
+}
+
+/**
+ * Checks the blueprint against a terrain callback. Unbuildable exact spots are
+ * moved at most two tiles to the nearest free cell without colliding with
+ * another blueprint slot. It only describes a plan; it never places buildings.
+ */
+function analyzeDefensePlan(tileX, tileY, frontX, frontY, mapWidthTiles, mapHeightTiles, classifyTile) {
+    var wanted = defenseLayout(tileX, tileY, frontX, frontY);
+    var desired = {};
+    var used = {};
+    var plan = {
+        centerTileX: tileX,
+        centerTileY: tileY,
+        frontX: frontX,
+        frontY: frontY,
+        direction: directionName(frontX, frontY),
+        total: wanted.length,
+        placements: [],
+        adjusted: 0,
+        occupied: 0,
+        water: 0,
+        outside: 0
+    };
+    function key(x, y) { return x + "," + y; }
+    for (var d = 0; d < wanted.length; d++) desired[key(wanted[d].x, wanted[d].y)] = true;
+    function classify(x, y) {
+        if (mapWidthTiles > 0 && (x < 0 || x >= mapWidthTiles)) return "outside";
+        if (mapHeightTiles > 0 && (y < 0 || y >= mapHeightTiles)) return "outside";
+        try { return classifyTile ? (classifyTile(x, y) || null) : null; }
+        catch (ignored) { return "occupied"; }
+    }
+    function isFree(x, y) {
+        var cellKey = key(x, y);
+        if (desired[cellKey] || used[cellKey]) return false;
+        return classify(x, y) === null;
+    }
+    function nearestFree(x, y) {
+        for (var distance = 1; distance <= 2; distance++) {
+            for (var dx = -distance; dx <= distance; dx++) {
+                var dyAbs = distance - Math.abs(dx);
+                if (dyAbs === 0) {
+                    if (isFree(x + dx, y)) return { x: x + dx, y: y };
+                } else {
+                    if (isFree(x + dx, y - dyAbs)) return { x: x + dx, y: y - dyAbs };
+                    if (isFree(x + dx, y + dyAbs)) return { x: x + dx, y: y + dyAbs };
+                }
+            }
+        }
+        return null;
+    }
+    for (var i = 0; i < wanted.length; i++) {
+        var target = wanted[i];
+        var targetKey = key(target.x, target.y);
+        var reason = classify(target.x, target.y);
+        var destination = null;
+        var adjusted = false;
+        if (reason === null && !used[targetKey]) {
+            destination = { x: target.x, y: target.y };
+        } else {
+            destination = nearestFree(target.x, target.y);
+            adjusted = !!destination;
+        }
+        if (destination) {
+            var destinationKey = key(destination.x, destination.y);
+            used[destinationKey] = true;
+            plan.placements.push({
+                kind: target.kind,
+                x: destination.x,
+                y: destination.y,
+                requestedX: target.x,
+                requestedY: target.y,
+                adjusted: adjusted
+            });
+            if (adjusted) plan.adjusted++;
+        } else if (reason === "water") {
+            plan.water++;
+        } else if (reason === "outside") {
+            plan.outside++;
+        } else {
+            plan.occupied++;
+        }
+    }
+    return plan;
+}
+
+/** Formats the selected site's compact blueprint and its terrain fit. */
+function formatDefensePlan(plan) {
+    if (!plan) return "";
+    var lines = [];
+    lines.push("[gold]🛡 План защиты · участок " + plan.centerTileX + "," + plan.centerTileY +
+        " · фронт " + plan.direction + "[]");
+    lines.push("[lightgray]□ 7 медных стен[] · [orange]● 4 Duo[] · [accent]○ 2 Scatter[] · [green]✚ 1 Mender[] (" + plan.total + " мест)");
+    var detail = "Местность: доступно " + plan.placements.length + "/" + plan.total;
+    if (plan.adjusted > 0) detail += " · сдвинуто " + plan.adjusted;
+    if (plan.occupied > 0) detail += " · занято " + plan.occupied;
+    if (plan.water > 0) detail += " · вода " + plan.water;
+    if (plan.outside > 0) detail += " · край карты " + plan.outside;
+    detail += " · только рекомендация";
+    lines.push((plan.placements.length === plan.total ? "[green]" : "[orange]") + detail + "[]");
+    return lines.join("\n");
+}
+
+/** Converts a click in the tactical-map element to a tile, ignoring letterbox. */
+function mapTileAt(localX, localY, elementWidth, elementHeight, mapWidth, mapHeight, mapOffsetX, mapOffsetY) {
+    var view = mapViewport(elementWidth, elementHeight, mapWidth, mapHeight);
+    if (!(view.scale > 0) || localX < view.x || localY < view.y ||
+            localX >= view.x + view.width || localY >= view.y + view.height) return null;
+    var worldX = (mapOffsetX || 0) + (localX - view.x) / view.scale;
+    var worldY = (mapOffsetY || 0) + (localY - view.y) / view.scale;
+    return { x: Math.floor(worldX / TILE_SIZE), y: Math.floor(worldY / TILE_SIZE) };
 }
 
 /** Markup colour of a weak-point kind; the same colour is used on the map. */
@@ -948,178 +1130,180 @@ function etaSeconds(etaTicks) {
     return Math.max(1, Math.floor(etaTicks / 60));
 }
 
-/** Legend shown under the tactical mini map. */
+/** Two short legend rows so the map stays easy to read without widening the HUD. */
 function legend() {
-    return "[lightgray]◆[accent] ядро  [lightgray]✚[yellow] усилить  [lightgray]□[scarlet] спавн  [lightgray]●[scarlet] враг  [lightgray]●[orange] авиация  [lightgray]◉[scarlet] босс[]";
+    return "[lightgray]Карта мира[]: [accent]◆[] ядро  [white]●[] игрок  [scarlet]□[] спавн\n" +
+        "[lightgray]Метки[]: [scarlet]●[] земля  [orange]●[] авиация  [scarlet]◉[] босс  [yellow]✚[] улучшить\n" +
+        "[lightgray]Клик по карте — выбрать участок · план не строит автоматически[]";
 }
 
+/** Short, plain-language reason for one recommended build/repair. */
+function compactAdviceDetail(wp, advice) {
+    if (!wp) return advice && advice.detail ? advice.detail : "";
+    switch (wp.kind) {
+        case MARKER_AIR:
+            return wp.airDps > 0
+                ? "нужно +" + fmtAmount(wp.needAir) + " урона/с по воздуху"
+                : "нет защиты от авиации";
+        case MARKER_WALL:
+            return "нужно +" + fmtAmount(wp.needWall) + " HP стен";
+        case MARKER_SUPPLY:
+            return "нет патронов";
+        case MARKER_REPAIR:
+            return "осталось " + Math.round(wp.healthPct) + "% HP";
+        default:
+            return "нужно +" + fmtAmount(wp.needGround) + " урона/с";
+    }
+}
+
+/**
+ * Builds a compact tactical briefing: immediate danger first, then the next
+ * useful action. Less actionable base/session counters are intentionally left
+ * out so the larger map does not turn the HUD into a screen-sized report.
+ */
 function formatRadarText(inGame, result) {
     if (!inGame || !result) {
-        return "[gold]РАДАР КАМПАНИИ[]\n[gray]Неактивен вне игры[]";
+        return "[gold]РАДАР[]\n[gray]Неактивен вне игры — запустите бой, чтобы увидеть угрозы[]";
     }
 
     var lines = [];
-    lines.push("[gold]РАДАР КАМПАНИИ[] [lightgray]v1.5[]");
-
-    // --- wave status --------------------------------------------------------
+    var header = "[gold]РАДАР[]";
     if (result.hasWaves && result.wave > 0) {
-        var waveText = "[accent]🌊 Волна " + result.wave + "[]";
-        if (result.winWave > 0) waveText += "[lightgray]/" + result.winWave + "[]";
-        if (result.waveInProgress) waveText += " [orange]· бой[]";
-        if (result.waveTimeSec >= 0) waveText += " [lightgray]· след. через " + fmtTime(result.waveTimeSec) + "[]";
-        else if (!result.waveInProgress) waveText += " [lightgray]· след. по кнопке[]";
-        lines.push(waveText);
+        header += " [lightgray]·[] [accent]Волна " + result.wave + "[]";
+        if (result.winWave > 0) header += "[lightgray]/" + result.winWave + "[]";
+        if (result.waveInProgress) header += " [orange]· идёт бой[]";
+        if (result.waveTimeSec >= 0) header += " [lightgray]· следующая через " + fmtTime(result.waveTimeSec) + "[]";
+        else if (!result.waveInProgress) header += " [lightgray]· запуск вручную[]";
     }
+    lines.push(header);
 
-    // --- enemies on the map -------------------------------------------------
-    var countText = "[white]👾[accent] " + result.count + "[]";
     if (result.count > 0) {
-        countText += " [lightgray]🚜" + result.groundCount + " 🛸" + result.flyingCount + "[]";
-        if (result.bossCount > 0) countText += " [scarlet]💀" + result.bossCount + "[]";
-        countText += " [lightgray]ΣHP ~" + fmtAmount(result.totalEnemyHp) + " · " + Math.round(result.totalEnemyDps) + "/с";
-        if (isFinite(result.nearestTiles)) countText += " · ближ. " + Math.round(result.nearestTiles) + " бл.";
-        countText += "[]";
-    }
-    lines.push(countText);
+        var enemyLine = "[white]Враги: " + result.count + " (земля " + result.groundCount +
+            ", авиация " + result.flyingCount;
+        if (result.bossCount > 0) enemyLine += ", боссы " + result.bossCount;
+        lines.push(enemyLine + ")[]");
 
-    if (result.bossCount > 0 && result.bossNames && result.bossNames.length > 0) {
-        lines.push("[scarlet]💀 БОСС: " + result.bossNames.join(", ") + "[]");
+        var strengthLine = "[lightgray]Сила: HP ~" + fmtAmount(result.totalEnemyHp) +
+            " · урон " + Math.round(result.totalEnemyDps) + "/с";
+        if (isFinite(result.nearestTiles)) {
+            strengthLine += " · ближайший " + Math.round(result.nearestTiles) + " тайлов";
+        }
+        lines.push(strengthLine + "[]");
     }
 
-    // --- the attack that is coming right now --------------------------------
+    // One clear line for the most relevant current engagement.
     if (result.threats > 0 && isFinite(result.directEta)) {
-        lines.push("[scarlet]⚠️ ПРОРЫВ " + result.threats + " к ядру · ETA " +
-            etaSeconds(result.directEtaLow) + "–" + etaSeconds(result.directEtaHigh) + "с[]");
+        var danger = "⚠️ К ядру идут " + result.threats + " · прибытие " +
+            etaSeconds(result.directEtaLow) + "–" + etaSeconds(result.directEtaHigh) + " с";
+        if (isFinite(result.coreDeath)) danger += " · ядро может пасть через ~" + Math.round(result.coreDeath) + " с";
+        lines.push("[scarlet]" + danger + "[]");
     } else if (result.closeThreats > 0) {
-        lines.push("[crimson]🚨 Враг у ядра[]");
+        lines.push("[crimson]🚨 Враг уже у ядра[]");
+    } else if (result.incoming > 0) {
+        var battle = "⚔ За " + Math.floor(result.horizonSeconds || HORIZON_SECONDS) + " с: " +
+            result.incoming + " " + foeWord(result.incoming) + " · урон " + Math.round(result.incomingDps) + "/с";
+        if (result.defenseDps > 0) battle += " · защита " + Math.round(result.defenseDps) + "/с";
+        else battle += " · защиты нет";
+        if (isFinite(result.coreDeath)) battle += " · ядро через ~" + Math.round(result.coreDeath) + " с";
+        else if (result.defenseDps > 0) battle += " · отбиваем";
+        lines.push((isFinite(result.coreDeath) ? "[crimson]" : "[orange]") + battle + "[]");
     } else if (result.count > 0 && isFinite(result.eta)) {
-        lines.push("[orange]🟠 Обход · ETA " +
-            etaSeconds(result.etaLow) + "–" + etaSeconds(result.etaHigh) + "с[]");
+        lines.push("[orange]🟠 Враг идёт в обход · прибытие " +
+            etaSeconds(result.etaLow) + "–" + etaSeconds(result.etaHigh) + " с[]");
     }
 
-    // --- the fight in the next minute, in one line --------------------------
-    if (result.incoming > 0) {
-        var battle = "⚔ " + Math.floor(result.horizonSeconds || HORIZON_SECONDS) + "с: " + result.incoming + " " +
-            foeWord(result.incoming) + " · " + Math.round(result.incomingDps) + "/с";
-        if (result.defenseDps > 0) battle += " · оборона " + Math.round(result.defenseDps) + "/с";
-        else battle += " · обороны нет";
-        if (isFinite(result.coreDeath)) {
-            lines.push("[crimson]" + battle + " → ядро за ~" + Math.round(result.coreDeath) + "с[]");
-        } else if (result.defenseDps > 0) {
-            lines.push("[green]" + battle + " → отобьём[]");
-        } else {
-            lines.push("[orange]" + battle + "[]");
+    // Show the two most useful build locations. Any additional places remain
+    // visible on the map, identified by the ✚ markers.
+    var weakPoints = result.weakPoints || [];
+    var shownWeakPoints = Math.min(2, weakPoints.length);
+    for (var wpI = 0; wpI < shownWeakPoints; wpI++) {
+        var wp = weakPoints[wpI];
+        var advice = adviceFor(wp);
+        var actionLine = wpI === 0 ? "[gold]🎯 Что улучшить:[] " : "";
+        actionLine += (wp.severity >= 0.65 ? "[crimson]" : "[lightgray]") + (wpI + 1) + ")[] " +
+            "[" + advice.color + "]" + advice.action + "[] [lightgray]· " + wp.direction + " " +
+            wp.tileX + "," + wp.tileY + " — " + compactAdviceDetail(wp, advice);
+        if (wpI === shownWeakPoints - 1 && weakPoints.length > shownWeakPoints) {
+            actionLine += " · ещё " + (weakPoints.length - shownWeakPoints) + " место ✚ на карте";
         }
+        lines.push(actionLine + "[]");
     }
 
-    // --- what to improve: the answer to "where do I build next?" ------------
-    if (result.weakPoints && result.weakPoints.length > 0) {
-        lines.push("[gold]🎯 УЛУЧШИТЬ:[]");
-        for (var wpI = 0; wpI < result.weakPoints.length; wpI++) {
-            var wp = result.weakPoints[wpI];
-            var advice = adviceFor(wp);
-            // The number is red when the spot is critical, the action word keeps
-            // the colour the map marker has.
-            lines.push((wp.severity >= 0.65 ? "[crimson]" : "[lightgray]") + (wpI + 1) + ")[] " +
-                "[" + advice.color + "]" + advice.action + "[lightgray] · " + wp.direction + " " +
-                wp.tileX + "," + wp.tileY + " — " + advice.detail + "[]");
-        }
-    }
-
-    // --- how long the base holds -------------------------------------------
     var fc = result.forecast;
     if (fc && fc.available) {
+        var reasonText = {
+            "ground": "наземка",
+            "air": "авиация",
+            "boss": "босс",
+            "no-ground": "нет урона по земле",
+            "no-air": "нет ПВО",
+            "no-defense": "нет обороны"
+        }[fc.reason] || "";
         if (fc.fallWave > 0) {
-            var reasonText = {
-                "ground": "пробьёт наземка",
-                "air": "пробьёт авиация",
-                "boss": "убьёт босс",
-                "no-ground": "нет урона по земле",
-                "no-air": "нет ПВО",
-                "no-defense": "обороны нет"
-            }[fc.reason] || "";
             if (result.wave > 0 && fc.fallWave <= result.wave) {
-                lines.push("[crimson]🏰 эта волна может быть последней — " + reasonText + "[]");
+                lines.push("[crimson]🏰 Эта волна может быть последней" +
+                    (reasonText ? " — " + reasonText : "") + "[]");
+            } else if (fc.wavesLeft <= 0) {
+                lines.push("[crimson]🏰 Оборона не выдержит следующую волну" +
+                    (reasonText ? " · причина: " + reasonText : "") + "[]");
             } else {
                 var fcColor = fc.wavesLeft <= 1 ? "[crimson]" : (fc.wavesLeft <= 4 ? "[orange]" : "[yellow]");
-                lines.push(fcColor + "🏰 ещё ~" + fc.wavesLeft + " " + waveWord(fc.wavesLeft) +
-                    " · свалится на ~" + fc.fallWave + "-й — " + reasonText + "[]");
+                lines.push(fcColor + "🏰 Оборона выдержит ~" + fc.wavesLeft + " " + waveWord(fc.wavesLeft) +
+                    " · риск на ~" + fc.fallWave + "-й" + (reasonText ? ": " + reasonText : "") + "[]");
             }
         } else if (fc.cappedByWin) {
-            lines.push("[green]🏰 дотянет до победы (волна " + result.winWave + ") ✅[]");
+            lines.push("[green]🏰 Оборона выдержит до победы (волна " + result.winWave + ") ✅[]");
         } else if (fc.wavesLeft > 0) {
-            lines.push("[green]🏰 держится ещё " + fc.wavesLeft + "+ волн[]");
+            lines.push("[green]🏰 Оборона держится ещё " + fc.wavesLeft + "+ волн[]");
         }
     }
 
-    // --- the next wave, so it can be prepared for ---------------------------
     if (result.nextWave) {
         var nw = result.nextWave;
-        var nwText = "[lightgray]🌊 след. волна " + nw.wave + ": " + nw.count + " " + foeWord(nw.count) +
-            " · ΣHP ~" + fmtAmount(nw.totalHp) + " · " + Math.round(nw.totalDps) + "/с";
-        if (nw.bossCount > 0) nwText += " · 💀" + nw.bossCount;
+        var nwText = "[lightgray]Следующая волна " + nw.wave + ": " + nw.count + " " + foeWord(nw.count);
         if (nw.composition) nwText += " · " + nw.composition;
+        else nwText += " · HP ~" + fmtAmount(nw.totalHp);
         lines.push(nwText + "[]");
     }
     if (fc && fc.available && fc.nextBossWave > 0 && fc.nextBossIn > 0 && fc.nextBossIn <= 10 && result.bossCount === 0 &&
             (!result.nextWave || result.nextWave.wave !== fc.nextBossWave)) {
-        lines.push("[scarlet]💀 босс/гардиан на волне " + fc.nextBossWave + " (через " + fc.nextBossIn + " " +
-            waveWord(fc.nextBossIn) + ")[]");
+        lines.push("[scarlet]💀 Босс на волне " + fc.nextBossWave + " · через " + fc.nextBossIn + " " +
+            waveWord(fc.nextBossIn) + "[]");
     }
 
-    // --- problems that need a reaction right now ----------------------------
-    if (result.minCoreHp < 99) {
-        var hp = Math.round(result.minCoreHp);
-        lines.push((hp <= 35 ? "[crimson]🚨 Ядро: " : "[coral]⚠️ Ядро: ") + hp + "% HP[]");
-    }
-
+    // Bundle urgent base diagnostics into one readable line instead of a row
+    // for every individual counter.
+    var diagnostics = [];
+    if (result.minCoreHp < 99) diagnostics.push("Ядро: HP " + Math.round(result.minCoreHp) + "%");
     if (result.hasPower) {
         if (result.blackout) {
-            lines.push("[scarlet]⚡ Сеть обесточена (" + Math.round(result.powerNet) + "/с)[]");
+            diagnostics.push("⚡ Электросеть отключена");
         } else if (result.powerDeficit) {
-            lines.push("[coral]⚡ Дефицит " + Math.round(result.powerNet) + "/с · АКБ " + Math.round(result.battery) + "%" +
-                (isFinite(result.batterySeconds) ? " (~" + fmtTime(result.batterySeconds) + ")" : "") + "[]");
+            var energy = "⚡ Энергия: не хватает " + Math.abs(Math.round(result.powerNet)) + "/с · батарея " +
+                Math.round(result.battery) + "%";
+            if (isFinite(result.batterySeconds)) energy += " (~" + fmtTime(result.batterySeconds) + ")";
+            diagnostics.push(energy);
         }
     }
 
-    // The ammo and the damage counts are only repeated when the advice list
-    // does not already point at the exact building.
-    var adviceKinds = result.weakPoints ? result.weakPoints.map(function (wp) { return wp.kind; }) : [];
-    var trouble = [];
+    var adviceKinds = weakPoints.map(function (point) { return point.kind; });
     if (result.emptyTurrets > 0 && adviceKinds.indexOf(MARKER_SUPPLY) === -1) {
-        trouble.push("📦 без патронов " + result.emptyTurrets);
+        diagnostics.push("📦 Турели без патронов: " + result.emptyTurrets);
     }
     if (result.damagedBuildings >= 3 && adviceKinds.indexOf(MARKER_REPAIR) === -1) {
-        trouble.push("🛠️ повреждено " + result.damagedBuildings);
+        diagnostics.push("🛠 Повреждено построек: " + result.damagedBuildings);
     }
-    if (trouble.length > 0) {
-        lines.push("[yellow]" + trouble.join(" · ") + "[]");
-    }
-
-    // --- base at a glance ---------------------------------------------------
-    var baseParts = [];
-    if (result.turretCount > 0) baseParts.push("турелей " + result.turretCount);
-    if (result.defenseDps > 0) baseParts.push("🛡" + Math.round(result.defenseDps) + "/с");
-    if (result.ownCount > 0) baseParts.push("🤖" + result.ownCount);
-    if (result.hasPower && !result.powerDeficit) {
-        baseParts.push("⚡" + (result.powerNet >= 0 ? "+" : "") + Math.round(result.powerNet) + "/с");
-    }
-    if (result.coreItems >= 0) baseParts.push("📦" + fmtAmount(result.coreItems));
-    if (baseParts.length > 0) {
-        lines.push("[lightgray]🏭 " + baseParts.join(" · ") + "[]");
+    if (diagnostics.length > 0) {
+        var diagnosticColor = result.blackout || result.minCoreHp <= 35 ? "[scarlet]" : "[yellow]";
+        lines.push(diagnosticColor + "⚠ " + diagnostics.join(" · ") + "[]");
     }
 
-    // --- all quiet ----------------------------------------------------------
-    var hasAlerts = (result.threats > 0) || (result.closeThreats > 0) || (result.bossCount > 0) ||
-                    (result.incoming > 0) ||
-                    (result.minCoreHp < 99) ||
-                    (result.powerDeficit) ||
-                    (result.forecast && result.forecast.fallWave > 0 && result.forecast.wavesLeft <= 1) ||
-                    (result.weakPoints && result.weakPoints.length > 0) ||
-                    (result.emptyTurrets > 0) || (result.damagedBuildings >= 3);
-
+    var hasAlerts = result.threats > 0 || result.closeThreats > 0 || result.bossCount > 0 ||
+        result.incoming > 0 || result.minCoreHp < 99 || result.powerDeficit ||
+        (fc && fc.fallWave > 0 && fc.wavesLeft <= 1) || weakPoints.length > 0 ||
+        result.emptyTurrets > 0 || result.damagedBuildings >= 3;
     if (!hasAlerts && result.count === 0) {
-        lines.push("[green]✅ Всё стабильно[]");
+        lines.push("[green]✅ Всё спокойно — угроз нет, база в порядке[]");
     }
 
     return lines.join("\n");
@@ -1135,7 +1319,10 @@ if (typeof module !== "undefined" && module && module.exports) {
         TILE_SIZE: TILE_SIZE,
         MINIMAP_WIDTH: MINIMAP_WIDTH,
         MINIMAP_GAP: MINIMAP_GAP,
+        PANEL_WIDTH: PANEL_WIDTH,
         RADAR_SIZE: RADAR_SIZE,
+        RADAR_HEIGHT_FRACTION: RADAR_HEIGHT_FRACTION,
+        PANEL_WIDTH_FRACTION: PANEL_WIDTH_FRACTION,
         RADAR_RANGE_TILES: RADAR_RANGE_TILES,
         DEFENSE_RING_TILES: DEFENSE_RING_TILES,
         WEAK_POINT_MAX: WEAK_POINT_MAX,
@@ -1160,6 +1347,15 @@ if (typeof module !== "undefined" && module && module.exports) {
         adviceFor: adviceFor,
         markerColor: markerColor,
         directionName: directionName,
+        PLAN_WALL: PLAN_WALL,
+        PLAN_DUO: PLAN_DUO,
+        PLAN_SCATTER: PLAN_SCATTER,
+        PLAN_MENDER: PLAN_MENDER,
+        defenseFront: defenseFront,
+        defenseLayout: defenseLayout,
+        analyzeDefensePlan: analyzeDefensePlan,
+        formatDefensePlan: formatDefensePlan,
+        mapTileAt: mapTileAt,
         mapViewport: mapViewport,
         projectMap: projectMap,
         legend: legend
@@ -1177,6 +1373,8 @@ if (typeof Vars !== "undefined" && typeof Events !== "undefined" && typeof Clien
     var statusLabel = null;
     var radarElement = null;
     var nextRefresh = 0;
+    var selectedTileX = -1;
+    var selectedTileY = -1;
 
     // Everything the mini map needs to draw itself. It lives in a closure so that
     // the JavaAdapter based element can read it without any extra Java class.
@@ -1199,7 +1397,10 @@ if (typeof Vars !== "undefined" && typeof Events !== "undefined" && typeof Clien
         threatY: 0,
         threatCoreX: 0,
         threatCoreY: 0,
-        hasThreat: false
+        hasThreat: false,
+        selectedTileX: -1,
+        selectedTileY: -1,
+        defensePlan: null
     };
 
     var logError = function (where, err) {
@@ -1219,6 +1420,32 @@ if (typeof Vars !== "undefined" && typeof Events !== "undefined" && typeof Clien
         } catch (err) {
             return fallback;
         }
+    };
+
+    /** Reads only public world/tile data; no build plans are sent to the game. */
+    var buildDefensePlan = function (tileX, tileY, prediction) {
+        var front = defenseFront(tileX, tileY, prediction.spawns || [], prediction.blips || []);
+        var width = prediction.mapWidthTiles || 0;
+        var height = prediction.mapHeightTiles || 0;
+        return analyzeDefensePlan(tileX, tileY, front.dx, front.dy, width, height, function (x, y) {
+            if (!Vars.world || x < 0 || y < 0 || (width > 0 && x >= width) || (height > 0 && y >= height)) {
+                return "outside";
+            }
+            var tile = null;
+            try { tile = Vars.world.tile(x, y); } catch (ignored) {}
+            if (!tile) return "outside";
+            var floor = callSafely(tile, "floor", null);
+            if (floor && callSafely(floor, "isLiquid", false)) return "water";
+            var block = callSafely(tile, "block", null);
+            if (!block) return null;
+            try {
+                var air = Packages.mindustry.content.Blocks.air;
+                if (block === air || String(callSafely(block, "name", "")) === "air") return null;
+            } catch (ignored) {
+                if (String(callSafely(block, "name", "")) === "air") return null;
+            }
+            return "occupied";
+        });
     };
 
     /**
@@ -1350,6 +1577,11 @@ if (typeof Vars !== "undefined" && typeof Events !== "undefined" && typeof Clien
         try {
             if (!Vars.state || !Vars.state.isGame() || !Vars.player || !Vars.player.isAdded()) {
                 statusLabel.setText(formatRadarText(false, null));
+                selectedTileX = -1;
+                selectedTileY = -1;
+                radarState.selectedTileX = -1;
+                radarState.selectedTileY = -1;
+                radarState.defensePlan = null;
                 radarState.blips = [];
                 radarState.cores = [];
                 radarState.spawns = [];
@@ -1599,8 +1831,12 @@ if (typeof Vars !== "undefined" && typeof Events !== "undefined" && typeof Clien
                 horizonSeconds: HORIZON_SECONDS
             });
 
-            statusLabel.setText(formatRadarText(true, radarData));
-            updateRadar(radarData, cores);
+            var defensePlan = selectedTileX >= 0 && selectedTileY >= 0
+                ? buildDefensePlan(selectedTileX, selectedTileY, radarData) : null;
+            var briefing = formatRadarText(true, radarData);
+            if (defensePlan) briefing += "\n" + formatDefensePlan(defensePlan);
+            statusLabel.setText(briefing);
+            updateRadar(radarData, cores, defensePlan);
         } catch (err) {
             logError("refresh failed", err);
             try {
@@ -1610,7 +1846,10 @@ if (typeof Vars !== "undefined" && typeof Events !== "undefined" && typeof Clien
     };
 
     /** Feeds the whole-map mini map with the freshly computed data. */
-    var updateRadar = function (prediction, cores) {
+    var updateRadar = function (prediction, cores, defensePlan) {
+        radarState.selectedTileX = selectedTileX;
+        radarState.selectedTileY = selectedTileY;
+        radarState.defensePlan = defensePlan || null;
         radarState.blips = prediction.blips || [];
         radarState.cores = [];
         radarState.spawns = prediction.spawns || [];
@@ -1715,6 +1954,7 @@ if (typeof Vars !== "undefined" && typeof Events !== "undefined" && typeof Clien
         var w = element.getWidth();
         var h = element.getHeight();
         if (!(w > 0) || !(h > 0)) return;
+        var symbolScale = Math.max(0.85, Math.min(1.35, Math.min(w, h) / 160));
 
         // The whole world always fits in this rectangle. Non-square maps are
         // letterboxed instead of stretched, so relative positions stay true.
@@ -1750,12 +1990,51 @@ if (typeof Vars !== "undefined" && typeof Events !== "undefined" && typeof Clien
         Lines.stroke(1.2);
         Lines.rect(mapX, mapY, view.width, view.height);
 
+        // The selected tile is ringed; proposed buildings use compact colour-coded markers.
+        if (state.selectedTileX >= 0 && state.selectedTileY >= 0) {
+            var selected = project((state.selectedTileX + 0.5) * TILE_SIZE,
+                (state.selectedTileY + 0.5) * TILE_SIZE);
+            Draw.color(0.9, 0.95, 1, 0.9);
+            Lines.stroke(1.3);
+            Lines.circle(selected.x, selected.y, 11 * symbolScale);
+            Lines.line(selected.x - 4 * symbolScale, selected.y,
+                selected.x + 4 * symbolScale, selected.y);
+            Lines.line(selected.x, selected.y - 4 * symbolScale,
+                selected.x, selected.y + 4 * symbolScale);
+        }
+        if (state.defensePlan) {
+            for (var pi = 0; pi < state.defensePlan.placements.length; pi++) {
+                var placement = state.defensePlan.placements[pi];
+                var ppPlan = project((placement.x + 0.5) * TILE_SIZE, (placement.y + 0.5) * TILE_SIZE);
+                if (placement.kind === PLAN_WALL) {
+                    Draw.color(0.78, 0.82, 0.85, 0.95);
+                    Lines.stroke(1.3);
+                    Lines.rect(ppPlan.x - 2.3 * symbolScale, ppPlan.y - 2.3 * symbolScale,
+                        4.6 * symbolScale, 4.6 * symbolScale);
+                } else if (placement.kind === PLAN_DUO) {
+                    Draw.color(1, 0.6, 0.15, 1);
+                    Fill.circle(ppPlan.x, ppPlan.y, 2.3 * symbolScale);
+                } else if (placement.kind === PLAN_SCATTER) {
+                    Draw.color(0.4, 0.7, 1, 1);
+                    Lines.stroke(1.3);
+                    Lines.circle(ppPlan.x, ppPlan.y, 2.8 * symbolScale);
+                } else {
+                    Draw.color(0.35, 1, 0.55, 1);
+                    Lines.stroke(1.3);
+                    Lines.circle(ppPlan.x, ppPlan.y, 3.1 * symbolScale);
+                    Lines.line(ppPlan.x - 2 * symbolScale, ppPlan.y, ppPlan.x + 2 * symbolScale, ppPlan.y);
+                    Lines.line(ppPlan.x, ppPlan.y - 2 * symbolScale, ppPlan.x, ppPlan.y + 2 * symbolScale);
+                }
+            }
+        }
+
         // Wave spawn points: small hollow red squares.
         for (var s = 0; s < state.spawns.length; s++) {
             var spawnP = project(state.spawns[s].x, state.spawns[s].y);
             Draw.color(1, 0.25, 0.25, 0.85);
             Lines.stroke(1.2);
-            Lines.rect(spawnP.x - 3, spawnP.y - 3, 6, 6);
+            Lines.rect(spawnP.x - 3 * symbolScale, spawnP.y - 3 * symbolScale,
+                6 * symbolScale, 6 * symbolScale);
         }
 
         // Places where the defence should be improved (also listed in the text).
@@ -1767,13 +2046,13 @@ if (typeof Vars !== "undefined" && typeof Events !== "undefined" && typeof Clien
             if (marker.severity >= 0.65) {
                 Draw.color(1, 0.25, 0.2, 0.9);
                 Lines.stroke(1.2);
-                Lines.circle(mp.x, mp.y, 10);
+                Lines.circle(mp.x, mp.y, 10 * symbolScale);
             }
             Draw.color(rgba[0], rgba[1], rgba[2], rgba[3]);
             Lines.stroke(1.6);
-            Lines.circle(mp.x, mp.y, 7);
-            Lines.line(mp.x - 4, mp.y, mp.x + 4, mp.y);
-            Lines.line(mp.x, mp.y - 4, mp.x, mp.y + 4);
+            Lines.circle(mp.x, mp.y, 7 * symbolScale);
+            Lines.line(mp.x - 4 * symbolScale, mp.y, mp.x + 4 * symbolScale, mp.y);
+            Lines.line(mp.x, mp.y - 4 * symbolScale, mp.x, mp.y + 4 * symbolScale);
         }
 
         // The closest threat and the core it is approaching.
@@ -1792,12 +2071,14 @@ if (typeof Vars !== "undefined" && typeof Events !== "undefined" && typeof Clien
             if (core.weakest) {
                 Draw.color(core.healthFrac <= 0.35 ? [1, 0.25, 0.2, 1][0] : 1, core.healthFrac <= 0.35 ? 0.25 : 0.85, core.healthFrac <= 0.35 ? 0.2 : 0.25, 1);
                 Lines.stroke(1.4);
-                Lines.circle(cp.x, cp.y, 7.5);
+                Lines.circle(cp.x, cp.y, 7.5 * symbolScale);
             }
             Draw.color(0.35, 0.65, 1, 1);
-            Fill.rect(cp.x - 3.5, cp.y - 3.5, 7, 7);
+            Fill.rect(cp.x - 3.5 * symbolScale, cp.y - 3.5 * symbolScale,
+                7 * symbolScale, 7 * symbolScale);
             Draw.color(1, 1, 1, 1);
-            Fill.rect(cp.x - 1.25, cp.y - 1.25, 2.5, 2.5);
+            Fill.rect(cp.x - 1.25 * symbolScale, cp.y - 1.25 * symbolScale,
+                2.5 * symbolScale, 2.5 * symbolScale);
         }
 
         // Enemy units. Positions outside the world rectangle (air spawns use a
@@ -1808,11 +2089,11 @@ if (typeof Vars !== "undefined" && typeof Events !== "undefined" && typeof Clien
             var color = blip.kind === KIND_BOSS ? [1, 0.13, 0.13, 1]
                 : (blip.kind === KIND_FLYING ? [1, 0.7, 0.2, 1] : [1, 0.36, 0.3, 1]);
             Draw.color(color[0], color[1], color[2], color[3]);
-            Fill.circle(bp.x, bp.y, blip.kind === KIND_BOSS ? 3.5 : 2.1);
+            Fill.circle(bp.x, bp.y, (blip.kind === KIND_BOSS ? 3.5 : 2.1) * symbolScale);
             if (blip.kind === KIND_BOSS) {
                 Draw.color(color[0], color[1], color[2], 0.55);
                 Lines.stroke(1);
-                Lines.circle(bp.x, bp.y, 6);
+                Lines.circle(bp.x, bp.y, 6 * symbolScale);
             }
         }
 
@@ -1820,9 +2101,9 @@ if (typeof Vars !== "undefined" && typeof Events !== "undefined" && typeof Clien
         if (state.hasPlayer) {
             var pp = project(state.playerX, state.playerY);
             Draw.color(0, 0, 0, 0.75);
-            Fill.circle(pp.x, pp.y, 3.4);
+            Fill.circle(pp.x, pp.y, 3.4 * symbolScale);
             Draw.color(1, 1, 1, 1);
-            Fill.circle(pp.x, pp.y, 2.5);
+            Fill.circle(pp.x, pp.y, 2.5 * symbolScale);
         }
     };
 
@@ -1832,20 +2113,30 @@ if (typeof Vars !== "undefined" && typeof Events !== "undefined" && typeof Clien
             // Placed at top-right, but clearly to the left of the vanilla minimap.
             Vars.ui.hudGroup.fill(asCons(function (t) {
                 t.top().right();
-                t.touchable = Touchable.disabled;
+                t.touchable = Touchable.childrenOnly;
 
                 var offset = Scl.scl(MINIMAP_WIDTH + MINIMAP_GAP);
+                var panelWidth = Scl.scl(PANEL_WIDTH);
+                var radarSize = Scl.scl(RADAR_SIZE);
                 try {
                     if (typeof Core !== "undefined" && Core.graphics) {
-                        offset = Math.min(offset, Core.graphics.getWidth() * 0.5);
+                        var screenWidth = Core.graphics.getWidth();
+                        var screenHeight = Core.graphics.getHeight();
+                        offset = Math.min(offset, screenWidth * 0.5);
+                        panelWidth = Math.min(panelWidth, screenWidth * PANEL_WIDTH_FRACTION);
+                        radarSize = Math.min(radarSize, panelWidth, screenHeight * RADAR_HEIGHT_FRACTION);
                     }
                 } catch (ignored) {}
+                panelWidth = Math.max(1, panelWidth);
+                radarSize = Math.max(1, radarSize);
 
                 t.table(Styles.black8, asCons(function (panel) {
                     panel.margin(6);
+                    panel.touchable = Touchable.childrenOnly;
                     panel.defaults().left().top();
 
-                    statusLabel = panel.add("Сканирование...").color(Color.white).left().growX().get();
+                    statusLabel = panel.add("Сканирование...").color(Color.white).left().width(panelWidth).get();
+                    try { statusLabel.setWrap(true); } catch (ignored) {}
                     panel.row();
 
                     radarElement = extend(Packages.arc.scene.Element, {
@@ -1854,12 +2145,31 @@ if (typeof Vars !== "undefined" && typeof Events !== "undefined" && typeof Clien
                         }
                     });
                     try {
-                        radarElement.touchable = Touchable.disabled;
-                    } catch (ignored) {}
-                    panel.add(radarElement).size(Scl.scl(RADAR_SIZE), Scl.scl(RADAR_SIZE));
+                        radarElement.touchable = Touchable.enabled;
+                        radarElement.addListener(extend(Packages.arc.scene.event.ClickListener, {
+                            clicked: function (event, x, y) {
+                                var tile = mapTileAt(x, y, radarElement.getWidth(), radarElement.getHeight(),
+                                    radarState.mapWidth, radarState.mapHeight,
+                                    radarState.mapOffsetX, radarState.mapOffsetY);
+                                if (!tile) return;
+                                if (tile.x === selectedTileX && tile.y === selectedTileY) {
+                                    selectedTileX = -1;
+                                    selectedTileY = -1;
+                                } else {
+                                    selectedTileX = tile.x;
+                                    selectedTileY = tile.y;
+                                }
+                                refreshRadar();
+                            }
+                        }));
+                    } catch (err) {
+                        logError("map selection unavailable", err);
+                    }
+                    panel.add(radarElement).size(radarSize, radarSize);
                     panel.row();
 
-                    panel.add(legend()).color(Color.lightGray).left().growX().get();
+                    var mapKey = panel.add(legend()).color(Color.lightGray).left().width(panelWidth).get();
+                    try { mapKey.setWrap(true); } catch (ignored) {}
                 })).marginTop(Scl.scl(6)).marginRight(offset);
 
                 t.update(function () {

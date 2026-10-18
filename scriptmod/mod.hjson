@@ -1,7 +1,7 @@
 name: campaign-threat-radar-zip
 displayName: Campaign Threat Radar (ZIP)
 author: local
-description: Client-only campaign tactical radar with a mini map of the enemy units, realistic approach ETA, forecast of the coming attack, boss alerts, core status, power deficits, and defense diagnostics. Script (ZIP) version - do not enable together with the Java jar.
-version: 1.3
+description: Client-only campaign tactical radar with a whole-map tactical view (all cores, spawns, enemies and weak-defence markers), realistic approach ETA, forecast of the coming attack, wave survival forecast (how many more waves your defense can hold), base and session statistics, boss alerts, core status, power deficits, and defense diagnostics. Script (ZIP) version - do not enable together with the Java jar.
+version: 1.4
 minGameVersion: 154
 hidden: true

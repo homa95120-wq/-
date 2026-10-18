@@ -17,21 +17,34 @@ const fillRectCalls = [];
 let loadHandler = null;
 let rootTable = null;
 let statusLabel = null;
+let statusCell = null;
+let legendLabel = null;
+let legendCell = null;
 let radarElement = null;
+let radarCell = null;
 let inGame = true;
 let unitEachThrows = false;
+const airBlock = { name: "air" };
+const occupiedTiles = new Set(["152,98"]);
+const waterTiles = new Set(["152,99"]);
 
 function makeLabel() {
     return {
         text: "",
+        wrapped: false,
         setText(t) {
             this.text = String(t);
+        },
+        setWrap(wrapped) {
+            this.wrapped = !!wrapped;
         }
     };
 }
 
 function makeCell(getter) {
     const cell = {
+        widthValue: null,
+        sizeValue: null,
         color() { return cell; },
         left() { return cell; },
         right() { return cell; },
@@ -39,7 +52,17 @@ function makeCell(getter) {
         bottom() { return cell; },
         growX() { return cell; },
         growY() { return cell; },
-        size() { return cell; },
+        width(v) { if (v !== undefined) cell.widthValue = v; return cell; },
+        size(w, h) {
+            if (w !== undefined && h !== undefined) {
+                cell.sizeValue = [w, h];
+                if (getter && typeof getter === "object") {
+                    getter.width = w;
+                    getter.height = h;
+                }
+            }
+            return cell;
+        },
         pad() { return cell; },
         row() { return cell; },
         get() { return getter; }
@@ -75,12 +98,21 @@ function makeTable() {
             if (typeof item === "string") {
                 const label = makeLabel();
                 label.text = item;
-                if (item === "Сканирование...") statusLabel = label;
-                return makeCell(label);
+                const cell = makeCell(label);
+                if (item === "Сканирование...") {
+                    statusLabel = label;
+                    statusCell = cell;
+                }
+                if (item.includes("Карта мира")) {
+                    legendLabel = label;
+                    legendCell = cell;
+                }
+                return cell;
             }
-            // A real element (the tactical mini map).
+            // A real element (the tactical whole-map view).
             radarElement = item;
-            return makeCell(item);
+            radarCell = makeCell(item);
+            return radarCell;
         },
         row() { return t; }
     };
@@ -94,9 +126,12 @@ function Element() {
     this.width = 160;
     this.height = 160;
     this.touchable = null;
+    this.listeners = [];
 }
 Element.prototype.getWidth = function () { return this.width; };
 Element.prototype.getHeight = function () { return this.height; };
+Element.prototype.addListener = function (listener) { this.listeners.push(listener); return true; };
+function ClickListener() {}
 
 const enemyUnit = {
     x: 0, y: 0,
@@ -146,7 +181,18 @@ const sandbox = {
     BlockGroup: { walls: "walls" },
     Vars: {
         headless: false,
-        world: { width: () => 300, height: () => 200 },
+        world: {
+            width: () => 300,
+            height: () => 200,
+            tile(x, y) {
+                if (x < 0 || y < 0 || x >= 300 || y >= 200) return null;
+                const key = x + "," + y;
+                return {
+                    floor: () => ({ isLiquid: waterTiles.has(key) }),
+                    block: () => occupiedTiles.has(key) ? { name: "copper-wall" } : airBlock
+                };
+            }
+        },
         spawner: {
             getSpawns: () => ({
                 size: 1,
@@ -202,7 +248,7 @@ const sandbox = {
     Time: { time: 0 },
     Color: { white: "white", lightGray: "lightGray", valueOf: (s) => s },
     Styles: { black8: "black8" },
-    Touchable: { disabled: "disabled" },
+    Touchable: { disabled: "disabled", childrenOnly: "childrenOnly", enabled: "enabled" },
     Log: { err: (msg) => logs.push(String(msg)) },
     Core: {
         settings: { getInt: () => 140 },
@@ -218,7 +264,10 @@ const sandbox = {
     Draw: { color: (...args) => { drawCalls.push(args); } },
     Fill: { rect: (...args) => { fillRectCalls.push(args); }, circle() {}, tri() {} },
     Lines: { stroke() {}, circle() {}, line() {}, rect() {}, dashLine() {} },
-    Packages: { arc: { scene: { Element } } },
+    Packages: {
+        arc: { scene: { Element, event: { ClickListener } } },
+        mindustry: { content: { Blocks: { air: airBlock } } }
+    },
     // Mirrors the extend() helper of the game's global.js (JavaAdapter based).
     extend(Base, def) {
         const instance = new Base();
@@ -244,40 +293,89 @@ check("ClientLoadEvent handler is registered and builds the panel", () => {
     assert.equal(typeof loadHandler, "function");
     loadHandler();
     assert.ok(rootTable, "hudGroup.fill was not called");
-    assert.equal(rootTable.touchable, "disabled");
+    assert.equal(rootTable.touchable, "childrenOnly");
     assert.ok(statusLabel, "status label was not captured");
     assert.ok(radarElement, "the tactical mini map was not created");
     assert.equal(typeof radarElement.draw, "function");
+    assert.equal(radarElement.touchable, "enabled");
+    assert.equal(radarElement.listeners.length, 1);
 });
 
-check("the panel keeps a clear gap to the left of the vanilla minimap", () => {
+check("the HUD uses a larger map and a width-limited, wrapped text column", () => {
     const panel = rootTable.lastTable;
     assert.ok(panel, "the panel table was not created");
-    // 150 (minimap) + 70 (gap) = 220 UI units, scaled by the UI scale.
-    assert.equal(panel.marginRightValue, 220);
+    assert.equal(panel.touchable, "childrenOnly");
+    // 150 (minimap) + 40 (gap) = 190 UI units.
+    assert.equal(panel.marginRightValue, 190);
     assert.equal(panel.marginTopValue, 6);
+    assert.equal(statusCell.widthValue, 390);
+    assert.equal(statusLabel.wrapped, true);
+    assert.equal(radarCell.sizeValue[0], 220);
+    assert.equal(radarCell.sizeValue[1], 220);
+    assert.equal(legendCell.widthValue, 390);
+    assert.equal(legendLabel.wrapped, true);
+    assert.match(legendLabel.text, /Клик по карте — выбрать участок/);
+    assert.match(legendLabel.text, /не строит автоматически/);
 });
 
-check("one enemy heading to the core shows count, threats and warning", () => {
-    assert.match(statusLabel.text, /👾\[accent\] 1/);
-    assert.match(statusLabel.text, /ПРОРЫВ 1 к ядру · ETA \d+–\d+с/);
+check("the HUD shrinks automatically on narrow and short screens", () => {
+    sandbox.Core.graphics.getWidth = () => 800;
+    sandbox.Core.graphics.getHeight = () => 600;
+    loadHandler();
+    const panel = rootTable.lastTable;
+    assert.equal(statusCell.widthValue, 304);
+    assert.equal(radarCell.sizeValue[0], 156);
+    assert.ok(statusCell.widthValue < 800 * 0.5);
+    assert.equal(panel.marginRightValue, 190);
+
+    // Restore the default preview dimensions for the remaining HUD checks.
+    sandbox.Core.graphics.getWidth = () => 1920;
+    sandbox.Core.graphics.getHeight = () => 1080;
+    loadHandler();
+});
+
+check("one enemy heading to the core shows a clear count and arrival estimate", () => {
+    assert.match(statusLabel.text, /Враги: 1 \(земля 1, авиация 0\)/);
+    assert.match(statusLabel.text, /К ядру идут 1 · прибытие \d+–\d+ с/);
 });
 
 check("dead and friendly units are not counted", () => {
     // The mock provides three units, only one of them is a living enemy.
-    assert.doesNotMatch(statusLabel.text, /👾\[accent\] 2/);
+    assert.doesNotMatch(statusLabel.text, /Враги: 2/);
 });
 
 check("wave status, survival forecast and next wave preview come from the spawn rules", () => {
-    assert.match(statusLabel.text, /🌊 Волна 3/);
-    assert.match(statusLabel.text, /след\. через 1:05/);
+    assert.match(statusLabel.text, /Волна 3/);
+    assert.match(statusLabel.text, /следующая через 1:05/);
     // Next spawn index is state.wave - 1 = 2, displayed as wave 4 with 4 Daggers.
-    assert.match(statusLabel.text, /🌊 след\. волна 4: 4 врага .*4×Dagger/);
+    assert.match(statusLabel.text, /Следующая волна 4: 4 врага .*4×Dagger/);
     assert.match(statusLabel.text, /🏰/);
-    assert.match(statusLabel.text, /1\)\[\] \[\w+\]ТУРЕЛЬ\[lightgray\] · (В|СВ) \d+,\d+ — по земле/);
-    // The session counters are not shown any more, the base line is.
-    assert.doesNotMatch(statusLabel.text, /Убито/);
-    assert.match(statusLabel.text, /🏭/);
+    assert.match(statusLabel.text, /Что улучшить:.*ТУРЕЛЬ\[\] \[lightgray\]· (В|СВ) \d+,\d+ — нужно \+\d+ урона\/с/);
+    // Session counters and non-actionable base statistics stay out of view.
+    assert.doesNotMatch(statusLabel.text, /Убито|построено|создано|турелей/);
+});
+
+check("clicking a map tile selects a spawn-facing terrain-checked plan and toggles it off", () => {
+    const targetX = 150, targetY = 100;
+    const view = sandbox.mapViewport(
+        radarElement.getWidth(), radarElement.getHeight(),
+        sandbox.radarState.mapWidth, sandbox.radarState.mapHeight
+    );
+    const localX = view.x + ((targetX + 0.5) * 8 - sandbox.radarState.mapOffsetX) * view.scale;
+    const localY = view.y + ((targetY + 0.5) * 8 - sandbox.radarState.mapOffsetY) * view.scale;
+    const clickListener = radarElement.listeners[0];
+    assert.equal(typeof clickListener.clicked, "function");
+    clickListener.clicked(null, localX, localY);
+    assert.match(statusLabel.text, /План защиты · участок 150,100 · фронт В/);
+    assert.match(statusLabel.text, /7 медных стен.*4 Duo.*2 Scatter.*1 Mender.*14 мест/);
+    assert.match(statusLabel.text, /доступно 14\/14 · сдвинуто 2 · только рекомендация/);
+    assert.equal(sandbox.radarState.defensePlan.placements.length, 14);
+    assert.equal(sandbox.radarState.defensePlan.adjusted, 2);
+    assert.doesNotThrow(() => radarElement.draw());
+
+    clickListener.clicked(null, localX, localY);
+    assert.doesNotMatch(statusLabel.text, /План защиты/);
+    assert.equal(sandbox.radarState.defensePlan, null);
 });
 
 check("the whole-map mini map draws without throwing", () => {
@@ -287,19 +385,19 @@ check("the whole-map mini map draws without throwing", () => {
     assert.ok(drawCalls.length > before, "the mini map did not draw anything");
     // The second core sits at world (2200, 1400) on a 300x200-tile map: it
     // would be far outside the old 120-tile local radar, but the whole-map
-    // projection places its 7x7 icon near the opposite corner of the element.
-    assert.ok(fillRectCalls.some((args) => args[0] > 130 && args[1] > 100 && args[2] === 7 && args[3] === 7),
+    // projection places its larger core marker near the opposite corner of the element.
+    assert.ok(fillRectCalls.some((args) => args[0] > 130 && args[1] > 100 && args[2] > 9 && args[3] > 9),
         "the distant core was not drawn inside the whole map: " + JSON.stringify(fillRectCalls));
 });
 
 check("panel refreshes only after REFRESH_INTERVAL ticks, then shows inactive outside game", () => {
     sandbox.Time.time = 0;
     rootTable.updateFn();
-    assert.match(statusLabel.text, /ПРОРЫВ/);
+    assert.match(statusLabel.text, /К ядру идут/);
     inGame = false;
     sandbox.Time.time = 1; // < 30: too early
     rootTable.updateFn();
-    assert.match(statusLabel.text, /ПРОРЫВ/);
+    assert.match(statusLabel.text, /К ядру идут/);
     sandbox.Time.time = 31; // >= 30: refresh happens
     rootTable.updateFn();
     assert.match(statusLabel.text, /Неактивен вне игры/);

@@ -3,15 +3,17 @@
 Same radar as the Java mod, written against the JavaScript/Rhino API
 that Mindustry v8 exposes to script mods. It exists for one reason: the
 finished product is a plain `.zip` that can be built anywhere (no JDK,
-no Gradle) and dropped into the `mods` folder as-is.
+no Gradle) and dropped into the `mods` folder as-is. The whole-map HUD is
+clickable: it previews a terrain-checked compact defence plan without placing
+blocks or changing the world.
 
 | File | Purpose |
 |---|---|
 | `mod.hjson` | Meta for the script mod. Internal name `campaign-threat-radar-zip`, `hidden: true`, **no** `main` and **no** `java: true` - with either of those the loader would treat the archive as a Java mod and fail to find the class. |
-| `scripts/main.js` | The mod. Pure logic + diagnostic radar algorithm + whole-map tactical view with weak-defence markers (`extend(Packages.arc.scene.Element, ...)`) + a prioritized "what to improve next" list + HUD registration at top-right (left of the minimap). |
+| `scripts/main.js` | The mod. Pure logic + diagnostic radar algorithm + larger whole-map tactical view with weak-defence markers and a click-selected defence blueprint (`extend(Packages.arc.scene.Element, ...)`) + a concise, prioritized action list + responsive HUD registration left of the minimap. The plan follows the nearest spawn, checks water/occupied/border tiles and never places buildings. |
 | `build.py` | Builds `../dist/CampaignThreatRadar.zip` (exactly `mod.hjson` + `scripts/main.js` in the archive root, reproducible bytes). |
-| `test-logic.js` | 48 offline checks of the pure logic (`node scriptmod/test-logic.js`). |
-| `test-hud.js` | Mock harness for the HUD glue: fires `ClientLoadEvent` against fake game globals (`node scriptmod/test-hud.js`). Catches typos in the glue, not Rhino-specific behaviour. |
+| `test-logic.js` | 52 offline checks of the pure logic (`node scriptmod/test-logic.js`), including plan geometry, terrain adjustment and map click projection. |
+| `test-hud.js` | 10-check mock harness for the HUD glue: fires `ClientLoadEvent` against fake game globals, simulates a map click and verifies the terrain-aware plan. Catches typos in the glue, not Rhino-specific behaviour. |
 
 Build and test:
 
@@ -43,5 +45,10 @@ Verified against the game sources (v160.7), not guessed:
   where it can actually shoot. Every marker also carries the *missing*
   amount (`needGround`, `needAir`, `needWall`), which is what the panel
   prints as "нужно +N/с" / "нужно +N HP".
+- A click on a non-letterboxed map cell selects a site; a second click clears it.
+  The 14-cell template contains 7 copper walls, 4 Duo, 2 Scatter and 1 Mender.
+  It is oriented toward the nearest spawn (or visible enemy), skips water and
+  occupied cells, and shifts a blocked cell by at most two tiles when possible.
+  It is a client-side recommendation only; no construction packet is sent.
 - `extend()`/JavaAdapter does not work on iOS, so the script build is not
   marked as iOS compatible.

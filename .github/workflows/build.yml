@@ -1,0 +1,28 @@
+name: Build Mod
+
+on: [push, pull_request]
+
+jobs:
+  buildJar:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: 'temurin'
+          java-version: 17
+
+      - name: Build mod jar
+        run: |
+          chmod +x ./gradlew
+          ./gradlew jar
+
+      - name: Upload built jar file
+        uses: actions/upload-artifact@v7
+        with:
+          archive: false
+          name: CampaignThreatRadar
+          path: build/libs/CampaignThreatRadar.jar

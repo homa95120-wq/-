@@ -1,0 +1,19 @@
+# Gradle
+.gradle/
+build/
+
+# IDEs
+.idea/
+*.iml
+.vscode/
+.settings/
+.classpath
+.project
+
+# Java
+*.class
+hs_err_pid*
+
+# OS
+.DS_Store
+Thumbs.db

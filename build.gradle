@@ -3,25 +3,46 @@ plugins {
 }
 
 group = 'campaignradar'
-version = '1.0'
+version = '1.1'
+
+// Mindustry v8 release to compile against. The game's own Java mod template
+// pulls its classes from the "dependencies.jar" attached to Mindustry's
+// GitHub releases, so do the same here.
+def mindustryVersion = 'v160.7'
 
 repositories {
     mavenCentral()
-    maven { url = 'https://www.jitpack.io' }
+
+    ivy {
+        name = 'Mindustry releases'
+        url = uri('https://github.com/')
+        patternLayout {
+            artifact '/[organisation]/[module]/releases/download/[revision]/dependencies.jar'
+        }
+        metadataSources {
+            artifact()
+        }
+        content {
+            includeVersion('Anuken', 'Mindustry', mindustryVersion)
+        }
+    }
 }
 
 dependencies {
-    compileOnly 'com.github.Anuken.Mindustry:core:v146'
+    // The game itself must never be packaged into the mod jar.
+    compileOnly "Anuken:Mindustry:${mindustryVersion}"
 }
 
 java {
-    toolchain {
-        languageVersion = JavaLanguageVersion.of(8)
-    }
+    // Mindustry v8 is built with Java 17; older targets cannot link against it.
+    sourceCompatibility = JavaVersion.VERSION_17
+    targetCompatibility = JavaVersion.VERSION_17
 }
 
 jar {
     archiveFileName = 'CampaignThreatRadar.jar'
+
+    // mod.hjson must sit in the root of the jar next to the class files.
     from('.') {
         include 'mod.hjson'
     }

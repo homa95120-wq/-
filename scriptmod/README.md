@@ -8,9 +8,9 @@ no Gradle) and dropped into the `mods` folder as-is.
 | File | Purpose |
 |---|---|
 | `mod.hjson` | Meta for the script mod. Internal name `campaign-threat-radar-zip`, `hidden: true`, **no** `main` and **no** `java: true` - with either of those the loader would treat the archive as a Java mod and fail to find the class. |
-| `scripts/main.js` | The mod. Pure logic + diagnostic radar algorithm + tactical mini map (`extend(Packages.arc.scene.Element, ...)`) + HUD registration at top-right (left of the minimap). |
+| `scripts/main.js` | The mod. Pure logic + diagnostic radar algorithm + whole-map tactical view with weak-defence markers (`extend(Packages.arc.scene.Element, ...)`) + HUD registration at top-right (left of the minimap). |
 | `build.py` | Builds `../dist/CampaignThreatRadar.zip` (exactly `mod.hjson` + `scripts/main.js` in the archive root, reproducible bytes). |
-| `test-logic.js` | 22 offline checks of the pure logic (`node scriptmod/test-logic.js`). |
+| `test-logic.js` | 44 offline checks of the pure logic (`node scriptmod/test-logic.js`). |
 | `test-hud.js` | Mock harness for the HUD glue: fires `ClientLoadEvent` against fake game globals (`node scriptmod/test-hud.js`). Catches typos in the glue, not Rhino-specific behaviour. |
 
 Build and test:
@@ -35,5 +35,11 @@ Verified against the game sources (v160.7), not guessed:
   is refused with "A mod with the name ... is already imported".
 - `hidden: true` makes the mod purely client-side: it is not required
   on multiplayer servers, so joining any server is seamless.
+- The whole-map view uses `Vars.world.width()/height()` (tiles, 8 world
+  units each) and preserves the aspect ratio; wave directions and spawn
+  markers come from `Vars.spawner.getSpawns()` (`Seq<Tile>`,
+  `Tile.worldx()/worldy()`). Weak-sector coverage uses `TurretBuild.range()`
+  plus the block's `targetGround`/`targetAir` flags, so a turret only counts
+  where it can actually shoot.
 - `extend()`/JavaAdapter does not work on iOS, so the script build is not
   marked as iOS compatible.

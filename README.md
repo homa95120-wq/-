@@ -31,6 +31,18 @@ The mod was written against an API that never existed (`ui.hudGroups`), used the
 which v8 rejects for java mods (must be >= 154). The build now follows the official
 Mindustry Java mod template (GitHub-release `dependencies.jar`, Java 17).
 
+## Скачать / Download
+
+Готовый jar лежит в разделе **[Releases](../../releases/latest)** — файл `CampaignThreatRadar.jar`
+скачивается одним кликом и без входа в GitHub. В описании релиза указаны размер и SHA-256;
+сверьте их со скачанным файлом:
+
+- Windows: `certutil -hashfile CampaignThreatRadar.jar SHA256`
+- Linux/macOS: `sha256sum CampaignThreatRadar.jar`
+
+Если хэш или размер не совпали, скачался не jar (так бывает, когда браузер сохраняет страницу
+входа или ошибки под именем `.jar`). Скачайте файл из Releases заново.
+
 ## Сборка / Building
 
 Нужен JDK 17+ (на компьютере). В корне репозитория:
@@ -41,8 +53,21 @@ Mindustry Java mod template (GitHub-release `dependencies.jar`, Java 17).
 
 Готовый мод: `build/libs/CampaignThreatRadar.jar` (внутри — скомпилированные классы + `mod.hjson`).
 
-Alternatively, every push builds the jar automatically via GitHub Actions
-(see the **Actions** tab → latest run → artifact `CampaignThreatRadar`).
+Every push also builds the jar in GitHub Actions (tab **Actions** → latest run → artifact
+`CampaignThreatRadar`). Artifacts require a GitHub login to download, so they are meant for
+quick checks, not for distribution — releases are the download path for players.
+
+### Выпуск релиза / Publishing a release
+
+The `Release` workflow builds the jar and attaches it to a GitHub Release:
+
+```bash
+git tag v1.1
+git push origin v1.1
+```
+
+Or without a terminal: **Actions → Release → Run workflow** and enter the tag (`v1.1`).
+If a release with that tag already exists, its jar is replaced.
 
 ## Установка / Installing
 
@@ -51,6 +76,19 @@ Alternatively, every push builds the jar automatically via GitHub Actions
 - **macOS:** `~/Library/Application Support/Mindustry/mods/`
 
 Или в игре: **Mods → Import file…** и выбрать jar. После перезапуска включите мод в списке.
+
+### Мод не появился в списке? / Mod not in the list?
+
+Mindustry молча пропускает jar, из которого не смогла прочитать метаданные. В логе
+(Windows `%APPDATA%\Mindustry\logs\latest.log`, Linux `~/.local/share/Mindustry/logs/`,
+macOS `~/Library/Application Support/Mindustry/logs/`) ищите строки:
+
+- `doesn't have a '[mod/plugin].[h]json' file, skipping` — в корне архива нет `mod.hjson`
+  (файл битый, это не jar, или внутри лишняя папка-обёртка);
+- `Failed to load mod file ... Skipping` — мод упал при загрузке, ниже будет стектрейс.
+
+Ещё две частые причины: игра не была перезапущена после копирования файла, и jar положен
+в папку установки игры вместо папки данных (пути выше).
 
 Затем запустите кампанию — в левом верхнем углу появится панель **CAMPAIGN RADAR**:
 количество вражеских юнитов, сколько из них движутся к ядрам и за сколько секунд

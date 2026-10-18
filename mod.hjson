@@ -1,0 +1,7 @@
+name: campaign-threat-radar
+displayName: Campaign Threat Radar
+author: local
+description: Client-only campaign HUD showing enemy units and likely approach to your cores.
+version: 1.0
+minGameVersion: 146
+main: campaignradar.CampaignThreatRadar

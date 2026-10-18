@@ -54,3 +54,24 @@ jobs:
           name: CampaignThreatRadar
           path: build/libs/CampaignThreatRadar.jar
           if-no-files-found: error
+
+      - name: Test and build the script (ZIP) mod
+        run: |
+          node scriptmod/test-logic.js
+          node scriptmod/test-hud.js
+          python3 scriptmod/build.py
+          # The loader needs exactly these two entries, in the archive root.
+          python3 - <<'PY'
+          import zipfile
+          names = zipfile.ZipFile('dist/CampaignThreatRadar.zip').namelist()
+          assert names == ['mod.hjson', 'scripts/main.js'], names
+          print('zip contents OK:', names)
+          PY
+
+      - name: Upload script (ZIP) mod
+        uses: actions/upload-artifact@v7
+        with:
+          archive: false
+          name: CampaignThreatRadar-zip
+          path: dist/CampaignThreatRadar.zip
+          if-no-files-found: error

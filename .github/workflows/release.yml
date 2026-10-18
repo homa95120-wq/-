@@ -47,6 +47,18 @@ jobs:
             | head -c 8 | od -An -t u1 \
             | awk '{ if ($8 == 61) print "class file version 61 (Java 17): OK"; else { print "unexpected class version: " $8; exit 1 } }'
 
+      - name: Test and build the script (ZIP) mod
+        run: |
+          node scriptmod/test-logic.js
+          node scriptmod/test-hud.js
+          python3 scriptmod/build.py
+          python3 - <<'PY'
+          import zipfile
+          names = zipfile.ZipFile('dist/CampaignThreatRadar.zip').namelist()
+          assert names == ['mod.hjson', 'scripts/main.js'], names
+          print('zip contents OK:', names)
+          PY
+
       - name: Resolve tag, size and checksum
         id: meta
         env:
@@ -71,6 +83,8 @@ jobs:
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "size=$(stat -c %s "$jar_path")" >> "$GITHUB_OUTPUT"
           echo "sha256=$(sha256sum "$jar_path" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          echo "zip_size=$(stat -c %s dist/CampaignThreatRadar.zip)" >> "$GITHUB_OUTPUT"
+          echo "zip_sha256=$(sha256sum dist/CampaignThreatRadar.zip | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
 
       - name: Publish release
         env:
@@ -78,28 +92,36 @@ jobs:
           TAG: ${{ steps.meta.outputs.tag }}
           SIZE: ${{ steps.meta.outputs.size }}
           SHA256: ${{ steps.meta.outputs.sha256 }}
+          ZIP_SIZE: ${{ steps.meta.outputs.zip_size }}
+          ZIP_SHA256: ${{ steps.meta.outputs.zip_sha256 }}
         run: |
           notes=$(printf '%s\n' \
-            'Готовый мод для Mindustry v8 (build 154+). A ready-to-use Mindustry v8 mod jar.' \
+            'Готовый мод для Mindustry v8 (build 154+). A ready-to-use Mindustry v8 mod.' \
+            '' \
+            'Два файла, одна и та же логика - ставьте только один из них:' \
+            '- `CampaignThreatRadar.jar` - Java-мод, проверенная сборка (рекомендуется);' \
+            '- `CampaignThreatRadar.zip` - скриптовая версия (Campaign Threat Radar (ZIP)), Java не нужна.' \
             '' \
             '**Установка / Install**' \
+            '- Steam (Windows): `<папка игры>\saves\mods\` - данные Steam-версии лежат в папке установки;' \
             '- Windows: `%APPDATA%\Mindustry\mods\`' \
             '- Linux: `~/.local/share/Mindustry/mods/`' \
             '- macOS: `~/Library/Application Support/Mindustry/mods/`' \
             '' \
-            'Или в игре: **Mods → Import file…** → выбрать `CampaignThreatRadar.jar`, перезапустить игру и включить мод в списке.' \
+            'Или в игре: **Mods → Import file…** → выбрать файл, перезапустить игру и включить мод в списке.' \
+            'Не включайте jar и zip одновременно - будет две панели.' \
             '' \
             '**Проверка файла / Verify**' \
-            "- Размер: \`$SIZE\` байт" \
-            "- SHA-256: \`$SHA256\`" \
+            "- jar: \`$SIZE\` байт, SHA-256: \`$SHA256\`" \
+            "- zip: \`$ZIP_SIZE\` байт, SHA-256: \`$ZIP_SHA256\`" \
             '' \
-            'Windows: `certutil -hashfile CampaignThreatRadar.jar SHA256` · Linux/macOS: `sha256sum CampaignThreatRadar.jar`')
+            'Windows: `certutil -hashfile <файл> SHA256` · Linux/macOS: `sha256sum <файл>`')
 
           if gh release view "$TAG" > /dev/null 2>&1; then
-            echo "Release $TAG already exists, replacing the jar."
-            gh release upload "$TAG" build/libs/CampaignThreatRadar.jar --clobber
+            echo "Release $TAG already exists, replacing the assets."
+            gh release upload "$TAG" build/libs/CampaignThreatRadar.jar dist/CampaignThreatRadar.zip --clobber
           else
-            gh release create "$TAG" build/libs/CampaignThreatRadar.jar \
+            gh release create "$TAG" build/libs/CampaignThreatRadar.jar dist/CampaignThreatRadar.zip \
               --target "$GITHUB_SHA" \
               --title "Campaign Threat Radar ${TAG#v}" \
               --notes "$notes" \

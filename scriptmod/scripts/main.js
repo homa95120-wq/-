@@ -134,6 +134,15 @@ function waveWord(n) {
     return "волн";
 }
 
+/** Russian plural of "враг": враг / врага / врагов. */
+function foeWord(n) {
+    var mod10 = n % 10;
+    var mod100 = n % 100;
+    if (mod10 === 1 && mod100 !== 11) return "враг";
+    if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return "врага";
+    return "врагов";
+}
+
 /** Eight-point compass name (in Russian) for a world-space direction. */
 function directionName(dx, dy) {
     if (!isFinite(dx) || !isFinite(dy) || (dx === 0 && dy === 0)) return "у ядра";
@@ -141,6 +150,73 @@ function directionName(dx, dy) {
     var index = Math.round(Math.atan2(dy, dx) / (Math.PI / 4));
     index = ((index % 8) + 8) % 8;
     return names[index];
+}
+
+/** Markup colour of a weak-point kind; the same colour is used on the map. */
+function markerColor(kind) {
+    switch (kind) {
+        case MARKER_AIR: return "accent";     // ПВО
+        case MARKER_GROUND: return "orange";  // турель по земле
+        case MARKER_WALL: return "lightgray"; // стены
+        case MARKER_SUPPLY: return "yellow";  // патроны
+        case MARKER_REPAIR: return "coral";   // ремонт
+        default: return "white";
+    }
+}
+
+/** RGBA of a weak-point kind for the tactical map. */
+function markerRgba(kind) {
+    switch (kind) {
+        case MARKER_AIR: return [0.40, 0.70, 1.0, 1.0];
+        case MARKER_GROUND: return [1.0, 0.60, 0.15, 1.0];
+        case MARKER_WALL: return [0.78, 0.82, 0.85, 1.0];
+        case MARKER_SUPPLY: return [1.0, 0.85, 0.20, 1.0];
+        case MARKER_REPAIR: return [1.0, 0.45, 0.40, 1.0];
+        default: return [1.0, 0.85, 0.20, 1.0];
+    }
+}
+
+/**
+ * Turns a weak point into a concrete instruction: what to build, how much of
+ * it is missing and in which colour it is drawn on the map. This is the answer
+ * to the only question that really matters in a defence: what do I improve?
+ */
+function adviceFor(wp) {
+    if (!wp) return { action: "УСИЛИТЬ", color: "white", detail: "" };
+    switch (wp.kind) {
+        case MARKER_AIR:
+            return {
+                action: "ПВО",
+                color: markerColor(MARKER_AIR),
+                detail: wp.airDps > 0
+                    ? "сейчас ~" + Math.round(wp.airDps) + "/с, нужно +" + Math.round(wp.needAir) + "/с"
+                    : "нет турелей по воздуху"
+            };
+        case MARKER_WALL:
+            return {
+                action: "СТЕНЫ",
+                color: markerColor(MARKER_WALL),
+                detail: "сейчас " + fmtAmount(wp.wallHp) + " HP, нужно +" + fmtAmount(wp.needWall) + " HP"
+            };
+        case MARKER_SUPPLY:
+            return {
+                action: "ПАТРОНЫ",
+                color: markerColor(MARKER_SUPPLY),
+                detail: "турель без патронов"
+            };
+        case MARKER_REPAIR:
+            return {
+                action: "РЕМОНТ",
+                color: markerColor(MARKER_REPAIR),
+                detail: "постройка на " + Math.round(wp.healthPct) + "% HP"
+            };
+        default:
+            return {
+                action: "ТУРЕЛЬ",
+                color: markerColor(MARKER_GROUND),
+                detail: "по земле ~" + Math.round(wp.groundDps) + "/с, нужно +" + Math.round(wp.needGround) + "/с"
+            };
+    }
 }
 
 /**
@@ -370,6 +446,10 @@ function computeWeakPoints(opts) {
                 wallHp: wallHp,
                 wallCount: wallCount,
                 turretCount: coveringTurrets,
+                // How much is missing here - the list tells the player what to build.
+                needGround: Math.max(0, requiredGround - groundDps),
+                needAir: requiredAir > 0 ? Math.max(0, requiredAir - airDps) : 0,
+                needWall: Math.max(0, requiredWallHp - wallHp),
                 healthPct: damagedMaxHp > 0 ? (damagedHp / damagedMaxHp) * 100 : 100,
                 tileX: Math.round(markerX / TILE_SIZE),
                 tileY: Math.round(markerY / TILE_SIZE)
@@ -403,6 +483,9 @@ function computeWeakPoints(opts) {
                 wallHp: 0,
                 wallCount: 0,
                 turretCount: 0,
+                needGround: 0,
+                needAir: 0,
+                needWall: 0,
                 healthPct: pct,
                 tileX: Math.round(building.x / TILE_SIZE),
                 tileY: Math.round(building.y / TILE_SIZE)
@@ -876,199 +959,157 @@ function formatRadarText(inGame, result) {
     }
 
     var lines = [];
-    lines.push("[gold]РАДАР КАМПАНИИ[] [lightgray]v1.4[]");
+    lines.push("[gold]РАДАР КАМПАНИИ[] [lightgray]v1.5[]");
 
-    // Wave status
+    // --- wave status --------------------------------------------------------
     if (result.hasWaves && result.wave > 0) {
         var waveText = "[accent]🌊 Волна " + result.wave + "[]";
-        if (result.winWave > 0) {
-            waveText += "[lightgray]/" + result.winWave + "[]";
-        }
-        if (result.waveInProgress) {
-            waveText += " [orange]· идёт бой[]";
-        }
-        if (result.waveTimeSec >= 0) {
-            waveText += " [lightgray]· след. через " + fmtTime(result.waveTimeSec) + "[]";
-        } else if (!result.waveInProgress) {
-            waveText += " [lightgray]· след. по кнопке[]";
-        }
+        if (result.winWave > 0) waveText += "[lightgray]/" + result.winWave + "[]";
+        if (result.waveInProgress) waveText += " [orange]· бой[]";
+        if (result.waveTimeSec >= 0) waveText += " [lightgray]· след. через " + fmtTime(result.waveTimeSec) + "[]";
+        else if (!result.waveInProgress) waveText += " [lightgray]· след. по кнопке[]";
         lines.push(waveText);
     }
 
-    // Enemy counts & composition
-    var countText = "[white]Враги:[accent] " + result.count + "[]";
+    // --- enemies on the map -------------------------------------------------
+    var countText = "[white]👾[accent] " + result.count + "[]";
     if (result.count > 0) {
-        countText += " [lightgray](🚜" + result.groundCount + " 🛸" + result.flyingCount + ")[]";
-        if (result.bossCount > 0) {
-            countText += " [scarlet]💀" + result.bossCount + "[]";
-        }
-        if (result.totalEnemyHp > 0) {
-            countText += " [lightgray]· ΣHP ~" + fmtAmount(result.totalEnemyHp) + " · урон ~" + Math.round(result.totalEnemyDps) + "/с[]";
-        }
-        if (isFinite(result.nearestTiles)) {
-            countText += " [lightgray]· ближ. " + Math.round(result.nearestTiles) + " бл.[]";
-        }
+        countText += " [lightgray]🚜" + result.groundCount + " 🛸" + result.flyingCount + "[]";
+        if (result.bossCount > 0) countText += " [scarlet]💀" + result.bossCount + "[]";
+        countText += " [lightgray]ΣHP ~" + fmtAmount(result.totalEnemyHp) + " · " + Math.round(result.totalEnemyDps) + "/с";
+        if (isFinite(result.nearestTiles)) countText += " · ближ. " + Math.round(result.nearestTiles) + " бл.";
+        countText += "[]";
     }
     lines.push(countText);
 
-    // Threat and time to contact
+    if (result.bossCount > 0 && result.bossNames && result.bossNames.length > 0) {
+        lines.push("[scarlet]💀 БОСС: " + result.bossNames.join(", ") + "[]");
+    }
+
+    // --- the attack that is coming right now --------------------------------
     if (result.threats > 0 && isFinite(result.directEta)) {
-        lines.push("[scarlet]⚠️ ПРОРЫВ: " + result.threats + " к ядру · ETA " +
+        lines.push("[scarlet]⚠️ ПРОРЫВ " + result.threats + " к ядру · ETA " +
             etaSeconds(result.directEtaLow) + "–" + etaSeconds(result.directEtaHigh) + "с[]");
     } else if (result.closeThreats > 0) {
-        lines.push("[crimson]🚨 Враг рядом с ядром![]");
+        lines.push("[crimson]🚨 Враг у ядра[]");
     } else if (result.count > 0 && isFinite(result.eta)) {
-        lines.push("[orange]🟠 Враги в обход · ETA " +
+        lines.push("[orange]🟠 Обход · ETA " +
             etaSeconds(result.etaLow) + "–" + etaSeconds(result.etaHigh) + "с[]");
-    } else if (result.count === 0) {
-        lines.push("[lightgray]Вражеских юнитов нет[]");
     }
 
-    // Forecast: what is going to happen in the next minutes
+    // --- the fight in the next minute, in one line --------------------------
     if (result.incoming > 0) {
-        lines.push("[lightgray]🔮 За " + Math.floor(result.horizonSeconds || HORIZON_SECONDS) + " с: " + result.incoming +
-            " врага у ядра · урон ~" + Math.round(result.incomingDps) + "/с[]");
-    }
-    if (isFinite(result.coreDeath)) {
-        lines.push("[crimson]💥 Ядро (" + Math.round(result.coreHealth) + " HP) падёт через ~" +
-            Math.round(result.coreDeath) + "с[]");
-    }
-    if (result.defenseDps > 0) {
-        var holds = result.incomingDps <= 0 || result.defenseDps >= result.incomingDps;
-        var defenseText = (holds ? "[green]🛡 Оборона ~" : "[orange]🛡 Оборона ~") + Math.round(result.defenseDps) + "/с — " +
-            (holds ? "шанс отбить высокий" : "может не удержать");
-        var defG = Math.round(result.defenseGroundDps + result.defenseSharedDps);
-        var defA = Math.round(result.defenseAirDps + result.defenseSharedDps);
-        if (defG > 0 || defA > 0) {
-            defenseText += " (🚜" + defG + " 🛸" + defA + (result.allyDps > 0 ? " 🤖" + Math.round(result.allyDps) : "") + ")";
+        var battle = "⚔ " + Math.floor(result.horizonSeconds || HORIZON_SECONDS) + "с: " + result.incoming + " " +
+            foeWord(result.incoming) + " · " + Math.round(result.incomingDps) + "/с";
+        if (result.defenseDps > 0) battle += " · оборона " + Math.round(result.defenseDps) + "/с";
+        else battle += " · обороны нет";
+        if (isFinite(result.coreDeath)) {
+            lines.push("[crimson]" + battle + " → ядро за ~" + Math.round(result.coreDeath) + "с[]");
+        } else if (result.defenseDps > 0) {
+            lines.push("[green]" + battle + " → отобьём[]");
+        } else {
+            lines.push("[orange]" + battle + "[]");
         }
-        lines.push(defenseText + "[]");
     }
 
-    // Wave survival forecast: how many more waves this defence can take
+    // --- what to improve: the answer to "where do I build next?" ------------
+    if (result.weakPoints && result.weakPoints.length > 0) {
+        lines.push("[gold]🎯 УЛУЧШИТЬ:[]");
+        for (var wpI = 0; wpI < result.weakPoints.length; wpI++) {
+            var wp = result.weakPoints[wpI];
+            var advice = adviceFor(wp);
+            // The number is red when the spot is critical, the action word keeps
+            // the colour the map marker has.
+            lines.push((wp.severity >= 0.65 ? "[crimson]" : "[lightgray]") + (wpI + 1) + ")[] " +
+                "[" + advice.color + "]" + advice.action + "[lightgray] · " + wp.direction + " " +
+                wp.tileX + "," + wp.tileY + " — " + advice.detail + "[]");
+        }
+    }
+
+    // --- how long the base holds -------------------------------------------
     var fc = result.forecast;
     if (fc && fc.available) {
         if (fc.fallWave > 0) {
             var reasonText = {
-                "ground": " — пробьёт наземка",
-                "air": " — пробьёт авиация",
-                "boss": " — убьёт босс/гардиан",
-                "no-ground": " — нет урона по земле",
-                "no-air": " — нет ПВО",
-                "no-defense": " — обороны нет"
+                "ground": "пробьёт наземка",
+                "air": "пробьёт авиация",
+                "boss": "убьёт босс",
+                "no-ground": "нет урона по земле",
+                "no-air": "нет ПВО",
+                "no-defense": "обороны нет"
             }[fc.reason] || "";
             if (result.wave > 0 && fc.fallWave <= result.wave) {
-                lines.push("[crimson]🏰 Прогноз: эта волна может стать последней" + reasonText + "[]");
+                lines.push("[crimson]🏰 эта волна может быть последней — " + reasonText + "[]");
             } else {
                 var fcColor = fc.wavesLeft <= 1 ? "[crimson]" : (fc.wavesLeft <= 4 ? "[orange]" : "[yellow]");
-                lines.push(fcColor + "🏰 Прогноз: ещё ~" + fc.wavesLeft + " " + waveWord(fc.wavesLeft) +
-                    " · падёт на ~" + fc.fallWave + "-й" + reasonText + "[]");
+                lines.push(fcColor + "🏰 ещё ~" + fc.wavesLeft + " " + waveWord(fc.wavesLeft) +
+                    " · свалится на ~" + fc.fallWave + "-й — " + reasonText + "[]");
             }
         } else if (fc.cappedByWin) {
-            lines.push("[green]🏰 Прогноз: дотянет до победы (волна " + result.winWave + ") ✅[]");
+            lines.push("[green]🏰 дотянет до победы (волна " + result.winWave + ") ✅[]");
         } else if (fc.wavesLeft > 0) {
-            lines.push("[green]🏰 Прогноз: держится ещё " + fc.wavesLeft + "+ " + waveWord(fc.wavesLeft) + "[]");
+            lines.push("[green]🏰 держится ещё " + fc.wavesLeft + "+ волн[]");
         }
     }
+
+    // --- the next wave, so it can be prepared for ---------------------------
     if (result.nextWave) {
         var nw = result.nextWave;
-        var nwText = "[lightgray]🌊 Волна " + nw.wave + ": " + nw.count + " враг. (🚜" + (nw.groundCount || 0) +
-            " 🛸" + (nw.flyingCount || 0) + ")";
-        if (nw.bossCount > 0) nwText += " 💀" + nw.bossCount;
-        nwText += " · ΣHP ~" + fmtAmount(nw.totalHp) + " · урон ~" + Math.round(nw.totalDps) + "/с";
+        var nwText = "[lightgray]🌊 след. волна " + nw.wave + ": " + nw.count + " " + foeWord(nw.count) +
+            " · ΣHP ~" + fmtAmount(nw.totalHp) + " · " + Math.round(nw.totalDps) + "/с";
+        if (nw.bossCount > 0) nwText += " · 💀" + nw.bossCount;
         if (nw.composition) nwText += " · " + nw.composition;
         lines.push(nwText + "[]");
     }
     if (fc && fc.available && fc.nextBossWave > 0 && fc.nextBossIn > 0 && fc.nextBossIn <= 10 && result.bossCount === 0 &&
             (!result.nextWave || result.nextWave.wave !== fc.nextBossWave)) {
-        lines.push("[scarlet]💀 Босс/гардиан на волне " + fc.nextBossWave + " (через " + fc.nextBossIn + " " + waveWord(fc.nextBossIn) + ")[]");
+        lines.push("[scarlet]💀 босс/гардиан на волне " + fc.nextBossWave + " (через " + fc.nextBossIn + " " +
+            waveWord(fc.nextBossIn) + ")[]");
     }
 
-    // Weak defence sectors: the same places are marked with ✚ on the whole-map radar.
-    if (result.weakPoints && result.weakPoints.length > 0) {
-        var shownWeak = Math.min(2, result.weakPoints.length);
-        for (var wpI = 0; wpI < shownWeak; wpI++) {
-            var wp = result.weakPoints[wpI];
-            var wpReason = "";
-            if (wp.kind === MARKER_AIR) {
-                wpReason = wp.airDps > 0 ? "слабое ПВО (~" + Math.round(wp.airDps) + "/с)" : "нет ПВО";
-            } else if (wp.kind === MARKER_WALL) {
-                wpReason = "нужны стены (сейчас ~" + fmtAmount(wp.wallHp) + " HP)";
-            } else if (wp.kind === MARKER_SUPPLY) {
-                wpReason = "турель без патронов";
-            } else if (wp.kind === MARKER_REPAIR) {
-                wpReason = "оборона повреждена (" + Math.round(wp.healthPct) + "% HP)";
-            } else {
-                wpReason = "мало урона по земле (~" + Math.round(wp.groundDps) + "/с)";
-            }
-            lines.push((wp.severity >= 0.65 ? "[orange]" : "[yellow]") + "🧭 Усилить " + wp.direction +
-                " (" + wp.tileX + "," + wp.tileY + "): " + wpReason + "[]");
-        }
-        if (result.weakPoints.length > shownWeak) {
-            lines.push("[lightgray]🧭 Ещё меток усиления: " + (result.weakPoints.length - shownWeak) + " — см. карту ✚[]");
-        }
-    }
-
-    // Boss warning
-    if (result.bossCount > 0 && result.bossNames && result.bossNames.length > 0) {
-        lines.push("[scarlet]💀 БОСС: " + result.bossNames.join(", ") + "[]");
-    }
-
-    // Core status
+    // --- problems that need a reaction right now ----------------------------
     if (result.minCoreHp < 99) {
         var hp = Math.round(result.minCoreHp);
-        if (hp <= 35) {
-            lines.push("[crimson]🚨 КРИТИЧЕСКИЙ УРОН ЯДРУ: " + hp + "%![]");
-        } else {
-            lines.push("[coral]⚠️ ЯДРО ПОВРЕЖДЕНО: " + hp + "%[]");
-        }
+        lines.push((hp <= 35 ? "[crimson]🚨 Ядро: " : "[coral]⚠️ Ядро: ") + hp + "% HP[]");
     }
 
-    // Power deficit / blackout
     if (result.hasPower) {
         if (result.blackout) {
-            lines.push("[scarlet]⚡ СЕТЬ ОБЕСТОЧЕНА: " + Math.round(result.powerNet) + "/с[]");
+            lines.push("[scarlet]⚡ Сеть обесточена (" + Math.round(result.powerNet) + "/с)[]");
         } else if (result.powerDeficit) {
-            lines.push("[coral]⚡ ДЕФИЦИТ ЭНЕРГИИ: " + Math.round(result.powerNet) + "/с (АКБ: " +
-                Math.round(result.battery) + "%)" +
-                (isFinite(result.batterySeconds) ? " · АКБ на ~" + fmtTime(result.batterySeconds) : "") + "[]");
+            lines.push("[coral]⚡ Дефицит " + Math.round(result.powerNet) + "/с · АКБ " + Math.round(result.battery) + "%" +
+                (isFinite(result.batterySeconds) ? " (~" + fmtTime(result.batterySeconds) + ")" : "") + "[]");
         }
     }
 
-    // Empty turrets
-    if (result.emptyTurrets > 0) {
-        lines.push("[yellow]📦 Турели без патронов: " + result.emptyTurrets + " шт.[]");
+    // The ammo and the damage counts are only repeated when the advice list
+    // does not already point at the exact building.
+    var adviceKinds = result.weakPoints ? result.weakPoints.map(function (wp) { return wp.kind; }) : [];
+    var trouble = [];
+    if (result.emptyTurrets > 0 && adviceKinds.indexOf(MARKER_SUPPLY) === -1) {
+        trouble.push("📦 без патронов " + result.emptyTurrets);
+    }
+    if (result.damagedBuildings >= 3 && adviceKinds.indexOf(MARKER_REPAIR) === -1) {
+        trouble.push("🛠️ повреждено " + result.damagedBuildings);
+    }
+    if (trouble.length > 0) {
+        lines.push("[yellow]" + trouble.join(" · ") + "[]");
     }
 
-    // Damaged defenses
-    if (result.damagedBuildings >= 3) {
-        lines.push("[yellow]🛠️ Повреждения базы: " + result.damagedBuildings + " построек[]");
-    }
-
-    // Base statistics
+    // --- base at a glance ---------------------------------------------------
     var baseParts = [];
-    if (result.buildingCount > 0) baseParts.push("построек " + result.buildingCount);
     if (result.turretCount > 0) baseParts.push("турелей " + result.turretCount);
-    if (result.ownCount > 0) baseParts.push("свои юниты " + result.ownCount + " (🚜" + result.ownGround + " 🛸" + result.ownFlying + ")");
+    if (result.defenseDps > 0) baseParts.push("🛡" + Math.round(result.defenseDps) + "/с");
+    if (result.ownCount > 0) baseParts.push("🤖" + result.ownCount);
     if (result.hasPower && !result.powerDeficit) {
         baseParts.push("⚡" + (result.powerNet >= 0 ? "+" : "") + Math.round(result.powerNet) + "/с");
     }
+    if (result.coreItems >= 0) baseParts.push("📦" + fmtAmount(result.coreItems));
     if (baseParts.length > 0) {
         lines.push("[lightgray]🏭 " + baseParts.join(" · ") + "[]");
     }
 
-    // Session statistics (the game's own GameStats counters)
-    if (result.stats) {
-        var st = result.stats;
-        var statText = "[gray]📈 Убито " + (st.kills || 0) + " · построено " + (st.built || 0) +
-            " · потеряно " + (st.destroyed || 0) + " · юнитов созд. " + (st.unitsCreated || 0);
-        if (result.coreItems >= 0) statText += " · 📦 в ядре " + fmtAmount(result.coreItems);
-        lines.push(statText + "[]");
-    } else if (result.coreItems >= 0) {
-        lines.push("[gray]📦 Предметов в ядре: " + fmtAmount(result.coreItems) + "[]");
-    }
-
-    // Safe status when no issues
+    // --- all quiet ----------------------------------------------------------
     var hasAlerts = (result.threats > 0) || (result.closeThreats > 0) || (result.bossCount > 0) ||
                     (result.incoming > 0) ||
                     (result.minCoreHp < 99) ||
@@ -1078,7 +1119,7 @@ function formatRadarText(inGame, result) {
                     (result.emptyTurrets > 0) || (result.damagedBuildings >= 3);
 
     if (!hasAlerts && result.count === 0) {
-        lines.push("[green]✅ Все системы стабильны[]");
+        lines.push("[green]✅ Всё стабильно[]");
     }
 
     return lines.join("\n");
@@ -1115,6 +1156,9 @@ if (typeof module !== "undefined" && module && module.exports) {
         fmtAmount: fmtAmount,
         fmtTime: fmtTime,
         waveWord: waveWord,
+        foeWord: foeWord,
+        adviceFor: adviceFor,
+        markerColor: markerColor,
         directionName: directionName,
         mapViewport: mapViewport,
         projectMap: projectMap,
@@ -1715,11 +1759,17 @@ if (typeof Vars !== "undefined" && typeof Events !== "undefined" && typeof Clien
         }
 
         // Places where the defence should be improved (also listed in the text).
+        // The colour says what to build there, the red ring marks a critical spot.
         for (var m = 0; m < state.weakPoints.length; m++) {
             var marker = state.weakPoints[m];
             var mp = project(marker.x, marker.y);
-            if (marker.severity >= 0.65) Draw.color(1, 0.45, 0.15, 1);
-            else Draw.color(1, 0.85, 0.2, 1);
+            var rgba = markerRgba(marker.kind);
+            if (marker.severity >= 0.65) {
+                Draw.color(1, 0.25, 0.2, 0.9);
+                Lines.stroke(1.2);
+                Lines.circle(mp.x, mp.y, 10);
+            }
+            Draw.color(rgba[0], rgba[1], rgba[2], rgba[3]);
             Lines.stroke(1.6);
             Lines.circle(mp.x, mp.y, 7);
             Lines.line(mp.x - 4, mp.y, mp.x + 4, mp.y);

@@ -14,7 +14,7 @@ const {
     MARKER_GROUND, MARKER_AIR, MARKER_WALL, MARKER_SUPPLY, MARKER_REPAIR,
     HORIZON_SECONDS, WAVE_FORECAST_MAX,
     predictArrival, forecastWaves, computeWeakPoints, computeRadar, formatRadarText, etaSeconds, legend,
-    fmtAmount, fmtTime, waveWord, directionName, mapViewport, projectMap
+    fmtAmount, fmtTime, waveWord, foeWord, adviceFor, directionName, mapViewport, projectMap
 } = require("./scripts/main.js");
 
 const CORE = { x: 100, y: 0, health: 1000, maxHealth: 1000 };
@@ -75,7 +75,7 @@ check("no enemy units: count 0, no threat, all stable", () => {
     assert.equal(r.minCoreHp, 100);
     assert.equal(r.emptyTurrets, 0);
     assert.equal(r.damagedBuildings, 0);
-    assert.match(formatRadarText(true, r), /Все системы стабильны/);
+    assert.match(formatRadarText(true, r), /Всё стабильно/);
 });
 
 check("stationary enemy is counted but is not a direct threat", () => {
@@ -102,7 +102,7 @@ check("enemy moving straight at the core: threat with a realistic ETA range", ()
     assert.ok(r.directEtaLow <= r.directEta && r.directEta <= r.directEtaHigh);
     // 600 * 1.3 detour / (1 * 0.82 cruise) = 951 ticks = ~15 s
     assert.ok(r.directEta > 900 && r.directEta < 1000, "eta was " + r.directEta);
-    assert.match(formatRadarText(true, r), /ПРОРЫВ: 1 к ядру · ETA \d+–\d+с/);
+    assert.match(formatRadarText(true, r), /ПРОРЫВ 1 к ядру · ETA \d+–\d+с/);
 });
 
 check("ETA uses the real speed of the unit type, not its current velocity", () => {
@@ -119,7 +119,7 @@ check("a detouring unit is predicted later than a direct one", () => {
     const direct = computeRadar({ units: [unit({ x: -500, vx: 1, speed: 1 })], cores: [CORE] });
     const detour = computeRadar({ units: [unit({ x: -500, vx: -1, speed: 1 })], cores: [CORE] });
     assert.ok(detour.eta > direct.eta);
-    assert.match(formatRadarText(true, detour), /Враги в обход · ETA/);
+    assert.match(formatRadarText(true, detour), /Обход · ETA/);
 });
 
 check("heading threshold: cosine > 0.25 counts, below does not", () => {
@@ -188,7 +188,7 @@ check("core damage warning triggered when core HP < 99%", () => {
     });
     assert.equal(r.minCoreHp, 30);
     const text = formatRadarText(true, r);
-    assert.match(text, /КРИТИЧЕСКИЙ УРОН ЯДРУ: 30%!/);
+    assert.match(text, /Ядро: 30% HP/);
 });
 
 check("power deficit and blackout diagnostics", () => {
@@ -200,7 +200,7 @@ check("power deficit and blackout diagnostics", () => {
     });
     assert.ok(r1.powerDeficit);
     assert.ok(!r1.blackout);
-    assert.match(formatRadarText(true, r1), /ДЕФИЦИТ ЭНЕРГИИ: -150\/с \(АКБ: 50%\)/);
+    assert.match(formatRadarText(true, r1), /Дефицит -150\/с · АКБ 50%/);
 
     // Complete blackout
     const r2 = computeRadar({
@@ -209,7 +209,7 @@ check("power deficit and blackout diagnostics", () => {
         power: { net: -50, batteryPercent: 0 }
     });
     assert.ok(r2.blackout);
-    assert.match(formatRadarText(true, r2), /СЕТЬ ОБЕСТОЧЕНА: -50\/с/);
+    assert.match(formatRadarText(true, r2), /Сеть обесточена \(-50\/с\)/);
 });
 
 check("empty turrets and damaged buildings diagnostics", () => {
@@ -222,8 +222,8 @@ check("empty turrets and damaged buildings diagnostics", () => {
     assert.equal(r.emptyTurrets, 2);
     assert.equal(r.damagedBuildings, 3);
     const text = formatRadarText(true, r);
-    assert.match(text, /Турели без патронов: 2 шт\./);
-    assert.match(text, /Повреждения базы: 3 построек/);
+    assert.match(text, /📦 без патронов 2/);
+    assert.match(text, /🛠️ повреждено 3/);
 });
 
 check("forecast: incoming units, their damage and the life of the core", () => {
@@ -241,8 +241,8 @@ check("forecast: incoming units, their damage and the life of the core", () => {
     // 1000 HP / 50 DPS = 20 s until the core falls
     assert.ok(Math.abs(r.coreDeath - 20) < 0.001, "coreDeath was " + r.coreDeath);
     const text = formatRadarText(true, r);
-    assert.match(text, /🔮 За 60 с: 2 врага у ядра · урон ~50\/с/);
-    assert.match(text, /💥 Ядро \(1000 HP\) падёт через ~20с/);
+    assert.match(text, /⚔ 60с: 2 врага · 50\/с/);
+    assert.match(text, /ядро за ~20с/);
 });
 
 check("forecast: a strong defence keeps the core alive", () => {
@@ -256,8 +256,8 @@ check("forecast: a strong defence keeps the core alive", () => {
     // The turrets deal more damage than the attackers, so the core survives.
     assert.equal(r.coreDeath, Infinity);
     const text = formatRadarText(true, r);
-    assert.match(text, /🛡 Оборона ~100\/с — шанс отбить высокий/);
-    assert.doesNotMatch(text, /падёт через/);
+    assert.match(text, /оборона 100\/с → отобьём/);
+    assert.doesNotMatch(text, /ядро за ~/);
 });
 
 check("forecast: a weak defence is reported as such", () => {
@@ -266,7 +266,7 @@ check("forecast: a weak defence is reported as such", () => {
         cores: [CORE],
         defenseDps: 40
     });
-    assert.match(formatRadarText(true, r), /🛡 Оборона ~40\/с — может не удержать/);
+    assert.match(formatRadarText(true, r), /⚔ 60с: 1 враг · 200\/с · оборона 40\/с/);
     // 1000 HP / (200 - 40) DPS = ~6 s
     assert.ok(Math.abs(r.coreDeath - 1000 / 160) < 0.001, "coreDeath was " + r.coreDeath);
 });
@@ -350,7 +350,7 @@ check("enemy totals: remaining HP, combined DPS and nearest distance", () => {
     // The flying unit is 40 world units from the core = 5 tiles.
     assert.equal(r.nearestTiles, 5);
     const text = formatRadarText(true, r);
-    assert.match(text, /ΣHP ~800 · урон ~50\/с/);
+    assert.match(text, /ΣHP ~800 · 50\/с/);
     assert.match(text, /ближ\. 5 бл\./);
 });
 
@@ -375,7 +375,7 @@ check("wave forecast: without any defence the base falls on the next wave", () =
     assert.equal(r.forecast.fallWave, 9);
     assert.equal(r.forecast.wavesLeft, 0);
     assert.equal(r.forecast.reason, "no-defense");
-    assert.match(formatRadarText(true, r), /🏰 Прогноз: ещё ~0 волн · падёт на ~9-й — обороны нет/);
+    assert.match(formatRadarText(true, r), /🏰 ещё ~0 волн · свалится на ~9-й — обороны нет/);
 });
 
 check("wave forecast: an overbuilt defence survives until the win wave", () => {
@@ -387,7 +387,7 @@ check("wave forecast: an overbuilt defence survives until the win wave", () => {
     });
     assert.equal(r.forecast.fallWave, 0);
     assert.ok(r.forecast.cappedByWin);
-    assert.match(formatRadarText(true, r), /🏰 Прогноз: дотянет до победы \(волна 10\)/);
+    assert.match(formatRadarText(true, r), /🏰 дотянет до победы \(волна 10\)/);
 });
 
 check("wave forecast: attrition wears a medium defence down after a few waves", () => {
@@ -444,8 +444,8 @@ check("wave forecast: a boss wave is the killer and is announced in advance", ()
     assert.equal(r.forecast.nextBossWave, 11);
     assert.equal(r.forecast.nextBossIn, 3);
     const text = formatRadarText(true, r);
-    assert.match(text, /убьёт босс\/гардиан/);
-    assert.match(text, /💀 Босс\/гардиан на волне 11 \(через 3 волны\)/);
+    assert.match(text, /убьёт босс/);
+    assert.match(text, /💀 босс\/гардиан на волне 11 \(через 3 волны\)/);
 });
 
 check("next wave preview skips empty waves and shows the composition", () => {
@@ -458,7 +458,7 @@ check("next wave preview skips empty waves and shows the composition", () => {
         futureWaves: [empty, real]
     });
     assert.equal(r.nextWave.wave, 10);
-    assert.match(formatRadarText(true, r), /🌊 Волна 10: 12 враг\. \(🚜9 🛸3\) · ΣHP ~1k · урон ~100\/с · 6×Dagger, 3×Flare/);
+    assert.match(formatRadarText(true, r), /🌊 след\. волна 10: 12 врагов · ΣHP ~1k · 100\/с · 6×Dagger, 3×Flare/);
 });
 
 check("wave forecast: the enemies already on the map can be the last wave", () => {
@@ -470,7 +470,7 @@ check("wave forecast: the enemies already on the map can be the last wave", () =
     });
     assert.equal(r.forecast.fallWave, 8);
     assert.equal(r.forecast.wavesLeft, 0);
-    assert.match(formatRadarText(true, r), /🏰 Прогноз: эта волна может стать последней/);
+    assert.match(formatRadarText(true, r), /🏰 эта волна может быть последней/);
 });
 
 check("wave forecast: ally units alone can hold a light wave", () => {
@@ -492,7 +492,7 @@ check("wave forecast stays hidden without waves or future data", () => {
     assert.doesNotMatch(formatRadarText(true, r), /🏰/);
 });
 
-check("base and session statistics lines", () => {
+check("the base line is compact and the session counters are gone", () => {
     const r = computeRadar({
         units: [], cores: [CORE],
         buildingCount: 132, turretCount: 11,
@@ -502,8 +502,10 @@ check("base and session statistics lines", () => {
         power: { net: 180, batteryPercent: 87 }
     });
     const text = formatRadarText(true, r);
-    assert.match(text, /🏭 построек 132 · турелей 11 · свои юниты 7 \(🚜5 🛸2\) · ⚡\+180\/с/);
-    assert.match(text, /📈 Убито 412 · построено 156 · потеряно 4 · юнитов созд\. 38 · 📦 в ядре 12k/);
+    assert.match(text, /🏭 турелей 11 · 🤖7 · ⚡\+180\/с · 📦12k/);
+    // The session counters are noise in a tactical panel and are not shown.
+    assert.doesNotMatch(text, /Убито/);
+    assert.doesNotMatch(text, /построено 156/);
 });
 
 check("battery autonomy is shown during a power deficit", () => {
@@ -511,7 +513,7 @@ check("battery autonomy is shown during a power deficit", () => {
         units: [], cores: [CORE],
         power: { net: -150, batteryPercent: 50, batterySeconds: 95 }
     });
-    assert.match(formatRadarText(true, r), /АКБ на ~1:35/);
+    assert.match(formatRadarText(true, r), /\(~1:35\)/);
 });
 
 check("whole-map viewport preserves aspect ratio and keeps every corner visible", () => {
@@ -543,7 +545,7 @@ check("weak point: an undefended spawn approach is marked on the defence ring", 
     // CORE.x = 100, plus 26 tiles * 8 = 308.
     assert.equal(r.weakPoints[0].x, 308);
     assert.equal(r.weakPoints[0].tileX, 39);
-    assert.match(formatRadarText(true, r), /🧭 Усилить В \(39,2\): мало урона по земле/);
+    assert.match(formatRadarText(true, r), /1\)\[\] \[orange\]ТУРЕЛЬ\[lightgray\] · В 39,2 — по земле ~0\/с, нужно \+65\/с\[\]/);
     assert.match(legend(), /усилить/);
     assert.match(legend(), /спавн/);
 });
@@ -588,7 +590,7 @@ check("weak point: ground-only coverage against an air wave produces an AA marke
         mapWidthTiles: 200, mapHeightTiles: 100
     });
     assert.equal(r.weakPoints[0].kind, MARKER_AIR);
-    assert.match(formatRadarText(true, r), /🧭 Усилить В \(39,2\): нет ПВО/);
+    assert.match(formatRadarText(true, r), /ПВО\[lightgray\] · В 39,2 — нет турелей по воздуху/);
 });
 
 check("weak point: an empty turret is marked at its exact position", () => {
@@ -619,6 +621,80 @@ check("weak point: the most damaged front-line building gets a repair marker", (
     assert.equal(points[0].kind, MARKER_REPAIR);
     assert.equal(points[0].x, 260);
     assert.equal(points[0].healthPct, 8);
+});
+
+check("the advice list says what to build and how much is missing", () => {
+    const r = computeRadar({
+        units: [], cores: [CORE],
+        defenders: [], walls: [],
+        spawns: [{ x: 1000, y: 0 }],
+        mapWidthTiles: 200, mapHeightTiles: 100,
+        futureWaves: [load({ wave: 2 })]
+    });
+    const text = formatRadarText(true, r);
+    assert.match(text, /🎯 УЛУЧШИТЬ:/);
+    // The place (direction + tile) and the missing amount are both there.
+    assert.match(text, /ТУРЕЛЬ\[lightgray\] · В 39,2 — по земле ~0\/с, нужно \+65\/с/);
+    assert.ok(r.weakPoints[0].needGround > 0, "the marker does not know what is missing");
+});
+
+check("the advice list names the anti-air gap and the wall gap", () => {
+    const airLoad = load({
+        groundCount: 0, flyingCount: 10,
+        groundHp: 0, flyingHp: 700, groundDps: 0, flyingDps: 80,
+        totalHp: 700, totalDps: 80, composition: "10×Flare"
+    });
+    const r = computeRadar({
+        units: [], cores: [CORE],
+        defenders: [defender({ dps: 500, targetsGround: true, targetsAir: false })],
+        walls: wallLine(8, 600),
+        spawns: [{ x: 1000, y: 0 }],
+        futureWaves: [airLoad],
+        mapWidthTiles: 200, mapHeightTiles: 100
+    });
+    assert.match(formatRadarText(true, r), /ПВО\[lightgray\] · В 39,2 — нет турелей по воздуху/);
+    assert.ok(r.weakPoints[0].needAir > 0, "the air deficit is unknown");
+
+    const walled = computeRadar({
+        units: [], cores: [CORE],
+        defenders: [defender({ dps: 1000 })],
+        walls: [],
+        spawns: [{ x: 1000, y: 0 }],
+        futureWaves: [load({ wave: 2 })],
+        mapWidthTiles: 200, mapHeightTiles: 100
+    });
+    assert.match(formatRadarText(true, walled), /СТЕНЫ\[lightgray\] · В 39,2 — сейчас 0 HP, нужно \+600 HP/);
+});
+
+check("a busy game still fits into a short panel", () => {
+    const r = computeRadar({
+        units: [
+            unit({ x: -500, vx: 1, speed: 1, dps: 200, hp: 3000 }),
+            unit({ x: 900, vx: -1, speed: 1, dps: 60, flying: true })
+        ],
+        cores: [CORE],
+        defenseDps: 40,
+        emptyTurrets: 2,
+        damagedBuildings: 4,
+        turretCount: 6,
+        ownCount: 3,
+        coreItems: 3500,
+        waves: true, wave: 8, winWave: 30, waveTimeSec: 75,
+        futureWaves: [load({ wave: 9, count: 20, groundCount: 12, flyingCount: 8, totalHp: 5000, totalDps: 400 })],
+        spawns: [{ x: 1000, y: 0 }],
+        mapWidthTiles: 200, mapHeightTiles: 100,
+        power: { net: -150, batteryPercent: 50 }
+    });
+    const lines = formatRadarText(true, r).split("\n");
+    assert.ok(lines.length <= 12, "the panel has " + lines.length + " lines:\n" + lines.join("\n"));
+});
+
+check("plural of the enemy word", () => {
+    assert.equal(foeWord(1), "враг");
+    assert.equal(foeWord(2), "врага");
+    assert.equal(foeWord(5), "врагов");
+    assert.equal(foeWord(11), "врагов");
+    assert.equal(foeWord(21), "враг");
 });
 
 console.log("\n" + passed + "/" + passed + " checks passed");

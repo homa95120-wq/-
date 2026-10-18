@@ -5,9 +5,12 @@
  * Shows enemy counts and threat ETAs, a responsive whole-map tactical view,
  * the two most important places to improve, urgent core/power diagnostics,
  * a concise wave forecast, and a clickable terrain-aware defence planner.
+ * Optional, off-by-default autopilot (stage 1): captures one local Serpulo
+ * campaign sector on Normal using only the player's own unit and controls.
  *
  * Positioned at top-right, to the left of the vanilla minimap.
- * Uses `hidden: true` so it never affects multiplayer server compatibility.
+ * Uses `hidden: true` so it never affects multiplayer server compatibility;
+ * the autopilot refuses to run in any network game.
  */
 
 // ---------------------------------------------------------------- constants
@@ -1134,7 +1137,7 @@ function etaSeconds(etaTicks) {
 function legend() {
     return "[lightgray]Карта мира[]: [accent]◆[] ядро  [white]●[] игрок  [scarlet]□[] спавн\n" +
         "[lightgray]Метки[]: [scarlet]●[] земля  [orange]●[] авиация  [scarlet]◉[] босс  [yellow]✚[] улучшить\n" +
-        "[lightgray]Клик по карте — выбрать участок · план не строит автоматически[]";
+        "[lightgray]Клик по карте — выбрать участок · строит только включённый автопилот[]";
 }
 
 /** Short, plain-language reason for one recommended build/repair. */
@@ -1309,6 +1312,362 @@ function formatRadarText(inGame, result) {
     return lines.join("\n");
 }
 
+// ---------------------------------------------------------------- autopilot (pure logic)
+//
+// One-to-one mirror of campaignradar.AutopilotLogic (Java). No game API is used
+// here, so everything below is covered by scriptmod/test-logic.js.
+
+var AP_OFF = 0, AP_RUNNING = 1, AP_PAUSED = 2, AP_NEEDS_HELP = 3, AP_COMPLETE = 4;
+var AP_CMD_START = 0, AP_CMD_PAUSE = 1, AP_CMD_STOP = 2, AP_CMD_FAIL = 3, AP_CMD_CAPTURED = 4;
+var AP_WAIT = 0, AP_REARM = 1, AP_DEFEND = 2, AP_REBUILD = 3, AP_DRILL = 4, AP_MINE = 5, AP_CALL_WAVE = 6, AP_DONE = 7;
+var AP_CELL_FREE = 0, AP_CELL_BLOCKED = 1, AP_CELL_CORE = 2;
+
+var AP_DECISION_INTERVAL_TICKS = 60; // one decision per second; movement is per frame
+var AP_MAX_PLANS_PER_CYCLE = 24;
+var AP_MAX_DEFENSE_PLANS_PER_CYCLE = 4;
+var AP_MAX_DRILLS = 12;
+var AP_MAX_CONVEYOR_PATH = 20;
+var AP_WINDOW_RADIUS = 24;
+var AP_COPPER_RESERVE = 40;
+var AP_REARM_FRACTION = 0.34;
+var AP_MIN_AMMO_STOCK = 10;
+var AP_WAVE_CALL_COOLDOWN_SEC = 20;
+var AP_SAFE_WAVE_MARGIN = 3;
+var AP_EARLY_CALL_MIN_TIMER_SEC = 15;
+var AP_MIN_CORE_HEALTH_FOR_WAVE = 0.8;
+var AP_STALL_SECONDS = 45;
+var AP_MAX_FAILURES = 5;
+var AP_RESPAWN_WAIT_SECONDS = 30;
+
+function autopilotStateName(state) {
+    if (state === AP_RUNNING) return "РАБОТАЕТ";
+    if (state === AP_PAUSED) return "ПАУЗА";
+    if (state === AP_NEEDS_HELP) return "НУЖНА ПОМОЩЬ";
+    if (state === AP_COMPLETE) return "СЕКТОР ЗАХВАЧЕН";
+    return "ВЫКЛ";
+}
+
+function autopilotStateColor(state) {
+    if (state === AP_RUNNING) return "green";
+    if (state === AP_PAUSED) return "yellow";
+    if (state === AP_NEEDS_HELP) return "scarlet";
+    if (state === AP_COMPLETE) return "accent";
+    return "lightgray";
+}
+
+/** State machine; START is only issued by the caller after the guard passed. */
+function autopilotTransition(state, command) {
+    if (command === AP_CMD_START) return AP_RUNNING;
+    if (command === AP_CMD_PAUSE) return state === AP_RUNNING ? AP_PAUSED : state;
+    if (command === AP_CMD_STOP) return AP_OFF;
+    if (command === AP_CMD_FAIL) return state === AP_RUNNING || state === AP_PAUSED ? AP_NEEDS_HELP : state;
+    if (command === AP_CMD_CAPTURED) return state === AP_RUNNING || state === AP_PAUSED ? AP_COMPLETE : state;
+    return state;
+}
+
+/** @return null when the autopilot may act, otherwise the reason it must not. */
+function autopilotGuardReason(g) {
+    if (!g || !g.inGame) return "нет активной игры";
+    if (g.netActive) return "сетевая игра — автопилот работает только в одиночной кампании";
+    if (!g.campaign) return "это не кампания — автопилот работает только в секторе кампании";
+    if (g.planet !== "serpulo") return "планета не Serpulo";
+    if (g.difficulty !== "normal") return "сложность кампании не Normal";
+    if (g.gameOver) return "игра окончена";
+    if (g.canBuild === false) return "текущий юнит не умеет строить";
+    return null;
+}
+
+/** @return null when stage 1 can capture this sector, otherwise why not. */
+function autopilotGoalProblem(goal) {
+    if (!goal) return "цель сектора неизвестна";
+    if (goal.captured) return null;
+    if (goal.attackMode) return "нужно уничтожить вражескую базу — атака пока не поддерживается";
+    if (!goal.waves) return "в секторе нет волн — цель сектора не распознана";
+    if (!(goal.winWave > 0)) return "у сектора нет волны победы — бесконечную оборону автопилот не завершит";
+    return null;
+}
+
+/** Observation with the same defaults as the Java class. */
+function autopilotObservation(overrides) {
+    var o = {
+        captured: false, playerAlive: true, buildQueue: 0, rearmInProgress: false,
+        rearmTargets: 0, defenseSlots: 0, rebuildSlots: 0, drills: 0, drillPossible: false,
+        minePossible: false, waves: false, waveSending: false, waveTimer: false, spawning: false,
+        enemies: 0, wave: 0, winWave: 0, waveTimeSec: -1, coreHealthFrac: 1,
+        secondsSinceWaveCall: Infinity, forecastAvailable: false, forecastFallWave: 0,
+        forecastCappedByWin: false
+    };
+    if (overrides) for (var key in overrides) o[key] = overrides[key];
+    return o;
+}
+
+/** @return null when the next wave may be called now, otherwise why not. */
+function autopilotWaveCallProblem(o) {
+    if (!o.waves || !o.waveSending) return "волны отключены";
+    if (o.winWave > 0 && o.wave >= o.winWave) {
+        return o.enemies > 0 ? "добиваем последнюю волну" : "ждём захвата сектора";
+    }
+    if (o.enemies > 0 || o.spawning) return "идёт бой";
+    if (o.coreHealthFrac < AP_MIN_CORE_HEALTH_FOR_WAVE) return "ядро повреждено — ждём ремонта";
+    if (o.secondsSinceWaveCall < AP_WAVE_CALL_COOLDOWN_SEC) return "пауза между волнами";
+    var nextWave = o.wave + 1;
+    var margin = !o.forecastAvailable || o.forecastFallWave <= 0 ? Infinity : o.forecastFallWave - nextWave;
+    if (o.waveTimer) {
+        if (o.waveTimeSec >= 0 && o.waveTimeSec < AP_EARLY_CALL_MIN_TIMER_SEC) return "волна скоро придёт сама";
+        var safe = o.forecastAvailable && (o.forecastFallWave <= 0 || margin >= AP_SAFE_WAVE_MARGIN);
+        return safe ? null : "оборона слабая — ждём таймер волны";
+    }
+    return margin >= 1 ? null : "прогноз: оборона не выдержит волну " + nextWave;
+}
+
+/** Picks exactly one action, in the same order as the Java version. */
+function autopilotDecide(o) {
+    if (o.captured) return { action: AP_DONE, reason: "сектор захвачен" };
+    if (!o.playerAlive) return { action: AP_WAIT, reason: "ждём возрождения юнита" };
+    if (o.rearmInProgress) return { action: AP_REARM, reason: "несу патроны к турели" };
+    if (o.buildQueue > 0) return { action: AP_WAIT, reason: "строится: " + o.buildQueue };
+    if (o.rearmTargets > 0) return { action: AP_REARM, reason: "турелей без патронов: " + o.rearmTargets };
+    if (o.defenseSlots > 0) return { action: AP_DEFEND, reason: "слабое направление: можно поставить " + o.defenseSlots };
+    if (o.rebuildSlots > 0) return { action: AP_REBUILD, reason: "разрушено и можно восстановить: " + o.rebuildSlots };
+    if (o.drills < AP_MAX_DRILLS && o.drillPossible) return { action: AP_DRILL, reason: "буров " + o.drills + "/" + AP_MAX_DRILLS };
+    var waveBlock = autopilotWaveCallProblem(o);
+    if (waveBlock === null) return { action: AP_CALL_WAVE, reason: "база готова к волне " + (o.wave + 1) };
+    if (o.minePossible) return { action: AP_MINE, reason: waveBlock };
+    return { action: AP_WAIT, reason: waveBlock };
+}
+
+/** Detects a building queue without progress and repeated failures. */
+function AutopilotWatchdog() {
+    this.lastProgressSec = NaN;
+    this.lastToken = null;
+    this.failures = 0;
+    this.failKey = "";
+}
+AutopilotWatchdog.prototype.stalled = function (busy, token, nowSec) {
+    if (!busy || token !== this.lastToken || isNaN(this.lastProgressSec)) {
+        this.lastToken = token;
+        this.lastProgressSec = nowSec;
+        return false;
+    }
+    return nowSec - this.lastProgressSec >= AP_STALL_SECONDS;
+};
+AutopilotWatchdog.prototype.fail = function (key) {
+    if (key === this.failKey) {
+        this.failures++;
+    } else {
+        this.failKey = key;
+        this.failures = 1;
+    }
+    return this.failures >= AP_MAX_FAILURES;
+};
+AutopilotWatchdog.prototype.success = function () {
+    this.failures = 0;
+    this.failKey = "";
+};
+AutopilotWatchdog.prototype.reset = function () {
+    this.success();
+    this.lastToken = null;
+    this.lastProgressSec = NaN;
+};
+
+function autopilotItemWeight(name) {
+    if (name === "copper") return 1;
+    if (name === "lead") return 0.7;
+    if (name === "titanium") return 0.6;
+    if (name === "sand") return 0.4;
+    if (name === "coal") return 0.35;
+    if (name === "scrap") return 0.2;
+    return 0.1;
+}
+
+/** The core unit only hand-mines what stage 1 really spends. */
+function autopilotIsMineWorthy(name) {
+    return name === "copper" || name === "lead" || name === "titanium";
+}
+
+/** Available resources ordered from the most to the least needed. */
+function autopilotRankItems(names, stock, available) {
+    var result = [];
+    for (var i = 0; i < names.length; i++) if (available[i]) result.push(i);
+    for (var a = 1; a < result.length; a++) {
+        var current = result[a];
+        var score = stock[current] / autopilotItemWeight(names[current]);
+        var j = a - 1;
+        while (j >= 0 && stock[result[j]] / autopilotItemWeight(names[result[j]]) > score) {
+            result[j + 1] = result[j];
+            j--;
+        }
+        result[j + 1] = current;
+    }
+    return result;
+}
+
+var AP_DX = [1, 0, -1, 0];
+var AP_DY = [0, 1, 0, -1];
+
+function autopilotSizeOffset(size) {
+    return 0 - Math.floor((size - 1) / 2);
+}
+
+/** Conveyor distance from every free cell to a cell touching a core, -1 when unreachable. */
+function autopilotCoreDistances(w, h, cells, maxPath) {
+    var dist = [];
+    var queue = [];
+    var head = 0;
+    for (var i = 0; i < w * h; i++) dist.push(-1);
+    for (var y = 0; y < h; y++) {
+        for (var x = 0; x < w; x++) {
+            var idx = y * w + x;
+            if (cells[idx] !== AP_CELL_FREE) continue;
+            for (var d = 0; d < 4; d++) {
+                var nx = x + AP_DX[d], ny = y + AP_DY[d];
+                if (nx >= 0 && ny >= 0 && nx < w && ny < h && cells[ny * w + nx] === AP_CELL_CORE) {
+                    dist[idx] = 0;
+                    queue.push(idx);
+                    break;
+                }
+            }
+        }
+    }
+    while (head < queue.length) {
+        var c = queue[head++];
+        if (dist[c] >= maxPath - 1) continue;
+        var cx = c % w, cy = Math.floor(c / w);
+        for (var k = 0; k < 4; k++) {
+            var px = cx + AP_DX[k], py = cy + AP_DY[k];
+            if (px < 0 || py < 0 || px >= w || py >= h) continue;
+            var n = py * w + px;
+            if (cells[n] !== AP_CELL_FREE || dist[n] !== -1) continue;
+            dist[n] = dist[c] + 1;
+            queue.push(n);
+        }
+    }
+    return dist;
+}
+
+function autopilotCountOre(w, ore, x0, y0, size, item) {
+    var count = 0;
+    for (var dy = 0; dy < size; dy++) {
+        for (var dx = 0; dx < size; dx++) {
+            if (ore[(y0 + dy) * w + (x0 + dx)] === item) count++;
+        }
+    }
+    return count;
+}
+
+/**
+ * Best drill site for `item` and its conveyor line to a core, or null.
+ * Returns { x, y, ore, pathLength, path: [x, y, rotation, ...] } in window cells.
+ */
+function autopilotFindDrillSite(w, h, cells, ore, item, size, maxPath) {
+    var dist = autopilotCoreDistances(w, h, cells, maxPath);
+    var offset = autopilotSizeOffset(size);
+    var minOre = Math.floor((size * size * 3 + 3) / 4);
+    var best = null;
+    var bestStart = -1;
+    for (var by = 0; by < h; by++) {
+        for (var bx = 0; bx < w; bx++) {
+            var x0 = bx + offset, y0 = by + offset;
+            if (x0 < 0 || y0 < 0 || x0 + size > w || y0 + size > h) continue;
+            var target = 0, other = 0, ok = true, touchesCore = false;
+            for (var fy = 0; fy < size && ok; fy++) {
+                for (var fx = 0; fx < size; fx++) {
+                    var i = (y0 + fy) * w + (x0 + fx);
+                    if (cells[i] !== AP_CELL_FREE) { ok = false; break; }
+                    if (ore[i] === item) target++;
+                    else if (ore[i] >= 0) other = Math.max(other, autopilotCountOre(w, ore, x0, y0, size, ore[i]));
+                }
+            }
+            if (!ok || target < minOre || target <= other) continue;
+
+            var startCell = -1, startDist = Infinity;
+            for (var dy = -1; dy <= size; dy++) {
+                for (var dx = -1; dx <= size; dx++) {
+                    var edgeX = dx === -1 || dx === size, edgeY = dy === -1 || dy === size;
+                    if (edgeX === edgeY) continue;
+                    var nx = x0 + dx, ny = y0 + dy;
+                    if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
+                    var n = ny * w + nx;
+                    if (cells[n] === AP_CELL_CORE) touchesCore = true;
+                    else if (cells[n] === AP_CELL_FREE && dist[n] >= 0 && dist[n] < startDist) {
+                        startDist = dist[n];
+                        startCell = n;
+                    }
+                }
+            }
+            var pathLength = touchesCore ? 0 : (startCell >= 0 ? startDist + 1 : -1);
+            if (pathLength < 0 || pathLength > maxPath) continue;
+            if (best === null || pathLength < best.pathLength || (pathLength === best.pathLength && target > best.ore)) {
+                best = { x: bx, y: by, ore: target, pathLength: pathLength, path: [] };
+                bestStart = touchesCore ? -1 : startCell;
+            }
+        }
+    }
+    if (best === null) return null;
+    var cell = bestStart;
+    for (var step = 0; step < best.pathLength && cell >= 0; step++) {
+        var x = cell % w, y = Math.floor(cell / w);
+        var rotation = -1, next = -1;
+        for (var r = 0; r < 4; r++) {
+            var qx = x + AP_DX[r], qy = y + AP_DY[r];
+            if (qx < 0 || qy < 0 || qx >= w || qy >= h) continue;
+            var q = qy * w + qx;
+            if (dist[cell] === 0 ? cells[q] === AP_CELL_CORE : dist[q] === dist[cell] - 1) {
+                rotation = r;
+                next = dist[cell] === 0 ? -1 : q;
+                break;
+            }
+        }
+        best.path.push(x, y, Math.max(rotation, 0));
+        cell = next;
+    }
+    return best;
+}
+
+/** Nearest free cell with `item` ore (Chebyshev rings), -1 when none. */
+function autopilotNearestOreCell(w, h, cells, ore, item, cx, cy, maxDist) {
+    for (var r = 0; r <= maxDist; r++) {
+        for (var y = cy - r; y <= cy + r; y++) {
+            for (var x = cx - r; x <= cx + r; x++) {
+                if (Math.max(Math.abs(x - cx), Math.abs(y - cy)) !== r) continue;
+                if (x < 0 || y < 0 || x >= w || y >= h) continue;
+                var i = y * w + x;
+                if (cells[i] === AP_CELL_FREE && ore[i] === item) return i;
+            }
+        }
+    }
+    return -1;
+}
+
+/** Priority of a blueprint kind for a weak point kind; -1 = do not build. */
+function autopilotDefensePriority(markerKind, planKind) {
+    if (planKind === PLAN_MENDER) return -1;
+    if (markerKind === MARKER_GROUND) return planKind === PLAN_DUO ? 0 : planKind === PLAN_WALL ? 1 : 2;
+    if (markerKind === MARKER_AIR) return planKind === PLAN_SCATTER ? 0 : planKind === PLAN_DUO ? 1 : 2;
+    if (markerKind === MARKER_WALL) return planKind === PLAN_WALL ? 0 : planKind === PLAN_DUO ? 1 : 2;
+    return -1;
+}
+
+/** Indices of blueprint placements in build order for this weak point. */
+function autopilotDefenseOrder(markerKind, planKinds) {
+    var order = [];
+    for (var priority = 0; priority <= 2; priority++) {
+        for (var i = 0; i < planKinds.length; i++) {
+            if (autopilotDefensePriority(markerKind, planKinds[i]) === priority) order.push(i);
+        }
+    }
+    return order;
+}
+
+/** Two short HUD lines: state, then the last action or the stop reason. */
+function autopilotFormatStatus(state, reason, lastAction) {
+    var text = "[" + autopilotStateColor(state) + "]🤖 Автопилот: " + autopilotStateName(state) + "[]";
+    if (state === AP_OFF && !reason) return text + " [lightgray]· Serpulo, Normal, один сектор[]";
+    var detail = state === AP_RUNNING ? lastAction : (reason ? reason : lastAction);
+    if (detail) text += "\n[lightgray]" + detail + "[]";
+    return text;
+}
+
 // Exported only for the offline test harness; `module` is undefined in Rhino.
 if (typeof module !== "undefined" && module && module.exports) {
     module.exports = {
@@ -1358,7 +1717,30 @@ if (typeof module !== "undefined" && module && module.exports) {
         mapTileAt: mapTileAt,
         mapViewport: mapViewport,
         projectMap: projectMap,
-        legend: legend
+        legend: legend,
+        AP_OFF: AP_OFF, AP_RUNNING: AP_RUNNING, AP_PAUSED: AP_PAUSED, AP_NEEDS_HELP: AP_NEEDS_HELP, AP_COMPLETE: AP_COMPLETE,
+        AP_CMD_START: AP_CMD_START, AP_CMD_PAUSE: AP_CMD_PAUSE, AP_CMD_STOP: AP_CMD_STOP,
+        AP_CMD_FAIL: AP_CMD_FAIL, AP_CMD_CAPTURED: AP_CMD_CAPTURED,
+        AP_WAIT: AP_WAIT, AP_REARM: AP_REARM, AP_DEFEND: AP_DEFEND, AP_REBUILD: AP_REBUILD,
+        AP_DRILL: AP_DRILL, AP_MINE: AP_MINE, AP_CALL_WAVE: AP_CALL_WAVE, AP_DONE: AP_DONE,
+        AP_CELL_FREE: AP_CELL_FREE, AP_CELL_BLOCKED: AP_CELL_BLOCKED, AP_CELL_CORE: AP_CELL_CORE,
+        AP_MAX_DRILLS: AP_MAX_DRILLS, AP_MAX_CONVEYOR_PATH: AP_MAX_CONVEYOR_PATH,
+        AP_STALL_SECONDS: AP_STALL_SECONDS, AP_MAX_FAILURES: AP_MAX_FAILURES,
+        autopilotStateName: autopilotStateName,
+        autopilotTransition: autopilotTransition,
+        autopilotGuardReason: autopilotGuardReason,
+        autopilotGoalProblem: autopilotGoalProblem,
+        autopilotObservation: autopilotObservation,
+        autopilotWaveCallProblem: autopilotWaveCallProblem,
+        autopilotDecide: autopilotDecide,
+        AutopilotWatchdog: AutopilotWatchdog,
+        autopilotRankItems: autopilotRankItems,
+        autopilotIsMineWorthy: autopilotIsMineWorthy,
+        autopilotSizeOffset: autopilotSizeOffset,
+        autopilotFindDrillSite: autopilotFindDrillSite,
+        autopilotNearestOreCell: autopilotNearestOreCell,
+        autopilotDefenseOrder: autopilotDefenseOrder,
+        autopilotFormatStatus: autopilotFormatStatus
     };
 }
 
@@ -1371,6 +1753,7 @@ if (typeof Vars !== "undefined" && typeof Events !== "undefined" && typeof Clien
     var asCons = typeof cons !== "undefined" ? cons : function (f) { return f; };
 
     var statusLabel = null;
+    var autopilotLabel = null;
     var radarElement = null;
     var nextRefresh = 0;
     var selectedTileX = -1;
@@ -1575,8 +1958,12 @@ if (typeof Vars !== "undefined" && typeof Events !== "undefined" && typeof Clien
     var refreshRadar = function () {
         if (!statusLabel) return;
         try {
+            if (autopilotLabel) autopilotLabel.setText(apStatusText());
+        } catch (ignored) {}
+        try {
             if (!Vars.state || !Vars.state.isGame() || !Vars.player || !Vars.player.isAdded()) {
                 statusLabel.setText(formatRadarText(false, null));
+                lastPrediction = null;
                 selectedTileX = -1;
                 selectedTileY = -1;
                 radarState.selectedTileX = -1;
@@ -1830,6 +2217,7 @@ if (typeof Vars !== "undefined" && typeof Events !== "undefined" && typeof Clien
                 power: powerInfo,
                 horizonSeconds: HORIZON_SECONDS
             });
+            lastPrediction = radarData;
 
             var defensePlan = selectedTileX >= 0 && selectedTileY >= 0
                 ? buildDefensePlan(selectedTileX, selectedTileY, radarData) : null;
@@ -2107,6 +2495,667 @@ if (typeof Vars !== "undefined" && typeof Events !== "undefined" && typeof Clien
         }
     };
 
+    // ------------------------------------------------------------ autopilot glue
+    //
+    // Mirror of campaignradar.Autopilot (Java). Off by default; acts only after
+    // the player presses ▶, only in a local Normal Serpulo campaign, and only
+    // through the player's own unit: build plans, mining, item transfer and the
+    // "next wave" button. Every failed check stops it with a readable reason.
+
+    var asRun = typeof run !== "undefined" ? run : function (f) { return f; };
+    var lastPrediction = null;
+
+    var autopilot = {
+        state: AP_OFF,
+        reason: "",
+        lastAction: "",
+        journal: [],
+        watchdog: new AutopilotWatchdog(),
+        ownPlans: [],
+        rejectedSites: {},
+        nextDecision: 0,
+        lastWaveCallSec: -1e9,
+        deadSinceSec: -1,
+        hasTarget: false,
+        targetX: 0,
+        targetY: 0,
+        arriveDistance: 0,
+        rearmStage: 0,
+        rearmTarget: null,
+        rearmItem: null,
+        defenseCandidates: [],
+        rebuildCandidates: [],
+        drillCandidates: [],
+        drillLabel: "",
+        mineCandidate: null,
+        move: null
+    };
+
+    var apLog = function (text) {
+        autopilot.journal.push(text);
+        if (autopilot.journal.length > 8) autopilot.journal.shift();
+        try { Log.info("[campaign-radar] autopilot: " + text); } catch (ignored) {}
+    };
+
+    var apAction = function (text) {
+        autopilot.lastAction = text;
+        apLog(text);
+    };
+
+    var apUnit = function () {
+        try {
+            var unit = Vars.player ? Vars.player.unit() : null;
+            if (!unit || (unit.isValid && !unit.isValid()) || (Vars.player.dead && Vars.player.dead())) return null;
+            return unit;
+        } catch (err) {
+            return null;
+        }
+    };
+
+    var apGuard = function () {
+        var g = { inGame: false, netActive: false, campaign: false, gameOver: false, planet: "", difficulty: "", canBuild: true };
+        try {
+            if (!Vars.state) return g;
+            g.inGame = !!Vars.state.isGame();
+            g.netActive = !!(Vars.net && Vars.net.active());
+            g.campaign = !!callSafely(Vars.state, "isCampaign", false);
+            g.gameOver = !!Vars.state.gameOver;
+            var planet = callSafely(Vars.state, "getPlanet", null);
+            g.planet = planet ? String(planet.name) : "";
+            g.difficulty = planet && planet.campaignRules && planet.campaignRules.difficulty
+                ? String(planet.campaignRules.difficulty.name()) : "";
+            var unit = apUnit();
+            g.canBuild = !unit || !!unit.canBuild();
+        } catch (err) {
+            logError("autopilot guard", err);
+        }
+        return g;
+    };
+
+    var apGoal = function () {
+        var rules = Vars.state && Vars.state.rules;
+        if (!rules) return null;
+        var sector = rules.sector;
+        return {
+            waves: !!rules.waves,
+            attackMode: !!rules.attackMode,
+            winWave: rules.winWave || 0,
+            captured: !!(sector && sector.info && sector.info.wasCaptured && !rules.waves && !rules.attackMode)
+        };
+    };
+
+    var apSetTarget = function (x, y, arrive) {
+        autopilot.hasTarget = true;
+        autopilot.targetX = x;
+        autopilot.targetY = y;
+        autopilot.arriveDistance = arrive;
+    };
+
+    var apClearMining = function () {
+        var unit = apUnit();
+        if (unit && unit.mineTile) unit.mineTile = null;
+    };
+
+    var apCancelOwnPlans = function (unit) {
+        for (var i = 0; i < autopilot.ownPlans.length; i++) {
+            try { unit.plans.remove(autopilot.ownPlans[i], true); } catch (ignored) {}
+        }
+        autopilot.ownPlans = [];
+    };
+
+    var apHalt = function () {
+        autopilot.hasTarget = false;
+        autopilot.rearmStage = 0;
+        autopilot.rearmTarget = null;
+        apClearMining();
+        var unit = apUnit();
+        if (unit) apCancelOwnPlans(unit);
+        autopilot.ownPlans = [];
+        autopilot.watchdog.reset();
+    };
+
+    var apFail = function (why) {
+        apHalt();
+        autopilot.state = autopilotTransition(autopilot.state, AP_CMD_FAIL);
+        autopilot.reason = why;
+        apLog("остановлен: " + why);
+    };
+
+    var apStart = function () {
+        var why = autopilotGuardReason(apGuard());
+        if (why !== null) {
+            if (autopilot.state === AP_RUNNING || autopilot.state === AP_PAUSED) apHalt();
+            autopilot.state = autopilot.state === AP_COMPLETE ? AP_COMPLETE : AP_OFF;
+            autopilot.reason = "запуск невозможен: " + why;
+            apLog(autopilot.reason);
+            return;
+        }
+        var goalWhy = autopilotGoalProblem(apGoal());
+        if (goalWhy !== null) {
+            autopilot.reason = "запуск невозможен: " + goalWhy;
+            apLog(autopilot.reason);
+            return;
+        }
+        var resumed = autopilot.state === AP_PAUSED;
+        autopilot.state = autopilotTransition(autopilot.state, AP_CMD_START);
+        autopilot.reason = "";
+        autopilot.watchdog.reset();
+        autopilot.nextDecision = 0;
+        apLog(resumed ? "продолжаю" : "включён: цель — захватить текущий сектор");
+    };
+
+    var apPause = function () {
+        if (autopilot.state !== AP_RUNNING) return;
+        autopilot.state = autopilotTransition(autopilot.state, AP_CMD_PAUSE);
+        autopilot.hasTarget = false;
+        apClearMining();
+        autopilot.reason = "пауза — нажмите ▶, чтобы продолжить";
+        apLog("пауза");
+    };
+
+    var apStop = function () {
+        if (autopilot.state === AP_OFF) return;
+        apHalt();
+        autopilot.state = autopilotTransition(autopilot.state, AP_CMD_STOP);
+        autopilot.reason = "остановлен игроком";
+        apLog(autopilot.reason);
+    };
+
+    var apStatusText = function () {
+        return autopilotFormatStatus(autopilot.state, autopilot.reason, autopilot.lastAction);
+    };
+
+    var apSteer = function (unit) {
+        var tx, ty, arrive;
+        var plan = unit.plans && unit.plans.size > 0 ? unit.buildPlan() : null;
+        if (plan) {
+            tx = plan.drawx();
+            ty = plan.drawy();
+            arrive = unit.type.buildRange * 0.5;
+        } else if (autopilot.hasTarget) {
+            tx = autopilot.targetX;
+            ty = autopilot.targetY;
+            arrive = autopilot.arriveDistance;
+        } else {
+            return;
+        }
+        var dx = tx - unit.x, dy = ty - unit.y;
+        if (Math.sqrt(dx * dx + dy * dy) <= arrive) return;
+        if (!autopilot.move) autopilot.move = new Vec2();
+        autopilot.move.set(dx, dy).setLength(unit.speed());
+        unit.movePref(autopilot.move);
+        unit.lookAt(autopilot.move.angle());
+    };
+
+    var apPack = function (x, y) { return x + "," + y; };
+
+    var apUsable = function (block) {
+        try {
+            return !!block && block.unlockedNow() && block.isPlaceable() && block.environmentBuildable();
+        } catch (err) {
+            return false;
+        }
+    };
+
+    var apBudget = function (core) {
+        var budget = {};
+        var items = Vars.content.items();
+        for (var i = 0; i < items.size; i++) {
+            var item = items.get(i);
+            budget[item.id] = core.items.get(item);
+        }
+        return budget;
+    };
+
+    var apReserve = function (budget, block, count) {
+        var multiplier = Vars.state.rules.buildCostMultiplier;
+        var req = block.requirements;
+        for (var i = 0; i < req.length; i++) {
+            var need = Math.ceil(req[i].amount * multiplier) * count;
+            var keep = String(req[i].item.name) === "copper" ? AP_COPPER_RESERVE : 0;
+            if ((budget[req[i].item.id] || 0) - need < keep) return false;
+        }
+        for (var j = 0; j < req.length; j++) {
+            budget[req[j].item.id] -= Math.ceil(req[j].amount * multiplier) * count;
+        }
+        return true;
+    };
+
+    var apFootprint = function (block, x, y, fn) {
+        var o = autopilotSizeOffset(block.size);
+        for (var dx = 0; dx < block.size; dx++) {
+            for (var dy = 0; dy < block.size; dy++) {
+                if (fn(apPack(x + o + dx, y + o + dy))) return true;
+            }
+        }
+        return false;
+    };
+
+    var apFindRearmTarget = function (data, core) {
+        var best = null, bestItem = null, bestDst = Infinity;
+        var buildings = data.buildings;
+        for (var i = 0; i < buildings.size; i++) {
+            var b = buildings.get(i);
+            if (!b || !(b.block instanceof ItemTurret) || b.totalAmmo === undefined) continue;
+            if (b.totalAmmo >= b.block.maxAmmo * AP_REARM_FRACTION) continue;
+            var ammo = null, stock = 0;
+            var keys = b.block.ammoTypes.keys().toSeq();
+            for (var k = 0; k < keys.size; k++) {
+                var item = keys.get(k);
+                var amount = core.items.get(item);
+                if (amount >= AP_MIN_AMMO_STOCK && amount > stock) {
+                    ammo = item;
+                    stock = amount;
+                }
+            }
+            if (!ammo) continue;
+            var dst = b.dst(core);
+            if (dst < bestDst) {
+                best = b;
+                bestItem = ammo;
+                bestDst = dst;
+            }
+        }
+        if (!best) return false;
+        autopilot.rearmTarget = best;
+        autopilot.rearmItem = bestItem;
+        return true;
+    };
+
+    var apCollectDefense = function (prediction, team, budget) {
+        autopilot.defenseCandidates = [];
+        if (!prediction || !prediction.weakPoints) return 0;
+        var taken = {};
+        for (var w = 0; w < prediction.weakPoints.length; w++) {
+            var wp = prediction.weakPoints[w];
+            if (wp.kind !== MARKER_GROUND && wp.kind !== MARKER_AIR && wp.kind !== MARKER_WALL) continue;
+            var plan = buildDefensePlan(wp.tileX, wp.tileY, prediction);
+            var kinds = [];
+            for (var p = 0; p < plan.placements.length; p++) kinds.push(plan.placements[p].kind);
+            var order = autopilotDefenseOrder(wp.kind, kinds);
+            for (var o = 0; o < order.length; o++) {
+                if (autopilot.defenseCandidates.length >= AP_MAX_DEFENSE_PLANS_PER_CYCLE) break;
+                var placement = plan.placements[order[o]];
+                var block = placement.kind === PLAN_WALL ? Blocks.copperWall
+                    : placement.kind === PLAN_DUO ? Blocks.duo
+                    : placement.kind === PLAN_SCATTER ? Blocks.scatter : null;
+                if (!apUsable(block)) continue;
+                if (apFootprint(block, placement.x, placement.y, function (key) { return !!taken[key]; })) continue;
+                if (!Build.validPlace(block, team, placement.x, placement.y, 0)) continue;
+                if (!apReserve(budget, block, 1)) continue;
+                apFootprint(block, placement.x, placement.y, function (key) { taken[key] = true; return false; });
+                autopilot.defenseCandidates.push(new BuildPlan(placement.x, placement.y, 0, block));
+            }
+            if (autopilot.defenseCandidates.length > 0) break;
+        }
+        return autopilot.defenseCandidates.length;
+    };
+
+    var apCollectRebuild = function (data, team, budget) {
+        autopilot.rebuildCandidates = [];
+        var iterator = data.plans.iterator();
+        while (iterator.hasNext() && autopilot.rebuildCandidates.length < AP_MAX_DEFENSE_PLANS_PER_CYCLE) {
+            var plan = iterator.next();
+            if (plan.removed || !apUsable(plan.block)) continue;
+            if (!Build.validPlace(plan.block, team, plan.x, plan.y, plan.rotation)) continue;
+            if (!apReserve(budget, plan.block, 1)) continue;
+            autopilot.rebuildCandidates.push(new BuildPlan(plan.x, plan.y, plan.rotation, plan.block, plan.config));
+        }
+        return autopilot.rebuildCandidates.length;
+    };
+
+    var apCountDrills = function (data) {
+        var count = 0;
+        for (var i = 0; i < data.buildings.size; i++) {
+            var b = data.buildings.get(i);
+            if (b && b.block instanceof Drill) count++;
+        }
+        return count;
+    };
+
+    /** Observed square around the core: cell kinds, ore ids and the origin tile. */
+    var apWindow = function (core, team) {
+        var size = AP_WINDOW_RADIUS * 2 + 1;
+        var ox = core.tileX() - AP_WINDOW_RADIUS, oy = core.tileY() - AP_WINDOW_RADIUS;
+        var cells = [], ore = [];
+        var coreClass = Packages.mindustry.world.blocks.storage.CoreBlock;
+        for (var y = 0; y < size; y++) {
+            for (var x = 0; x < size; x++) {
+                var tile = Vars.world.tile(ox + x, oy + y);
+                if (!tile) { cells.push(AP_CELL_BLOCKED); ore.push(-1); continue; }
+                var build = tile.build;
+                if (build && build.block instanceof coreClass && build.team === team) {
+                    cells.push(AP_CELL_CORE);
+                    ore.push(-1);
+                    continue;
+                }
+                var free = !autopilot.rejectedSites[apPack(ox + x, oy + y)]
+                    && Build.validPlace(Blocks.conveyor, team, ox + x, oy + y, 0);
+                cells.push(free ? AP_CELL_FREE : AP_CELL_BLOCKED);
+                var drop = tile.block() === Blocks.air ? tile.drop() : null;
+                ore.push(free && drop && !tile.floor().isLiquid ? drop.id : -1);
+            }
+        }
+        return { size: size, ox: ox, oy: oy, cells: cells, ore: ore };
+    };
+
+    var apItemTables = function (core) {
+        var items = Vars.content.items();
+        var names = [], stock = [];
+        for (var i = 0; i < items.size; i++) {
+            var item = items.get(i);
+            names[item.id] = String(item.name);
+            stock[item.id] = core.items.get(item);
+        }
+        return { items: items, names: names, stock: stock };
+    };
+
+    var apCollectDrill = function (core, team, budget) {
+        autopilot.drillCandidates = [];
+        var drill = null;
+        var options = [Blocks.pneumaticDrill, Blocks.mechanicalDrill];
+        for (var d = 0; d < options.length; d++) {
+            if (options[d] instanceof Drill && apUsable(options[d])) { drill = options[d]; break; }
+        }
+        if (!drill || !apUsable(Blocks.conveyor)) return false;
+        var win = apWindow(core, team);
+        var tables = apItemTables(core);
+        var available = [];
+        for (var a = 0; a < tables.names.length; a++) available.push(false);
+        for (var c = 0; c < win.ore.length; c++) {
+            var id = win.ore[c];
+            if (id >= 0 && tables.items.get(id).hardness <= drill.tier) available[id] = true;
+        }
+        var ranked = autopilotRankItems(tables.names, tables.stock, available);
+        for (var r = 0; r < ranked.length; r++) {
+            var site = autopilotFindDrillSite(win.size, win.size, win.cells, win.ore, ranked[r], drill.size, AP_MAX_CONVEYOR_PATH);
+            if (!site) continue;
+            var bx = win.ox + site.x, by = win.oy + site.y;
+            if (!Build.validPlace(drill, team, bx, by, 0)) {
+                autopilot.rejectedSites[apPack(bx, by)] = true;
+                continue;
+            }
+            var work = {};
+            for (var key in budget) work[key] = budget[key];
+            if (!apReserve(work, drill, 1) || !apReserve(work, Blocks.conveyor, site.pathLength)) continue;
+            var plans = [new BuildPlan(bx, by, 0, drill)];
+            var ok = true;
+            for (var s = 0; s < site.pathLength; s++) {
+                var cx = win.ox + site.path[s * 3], cy = win.oy + site.path[s * 3 + 1], rot = site.path[s * 3 + 2];
+                if (!Build.validPlace(Blocks.conveyor, team, cx, cy, rot)) { ok = false; break; }
+                plans.push(new BuildPlan(cx, cy, rot, Blocks.conveyor));
+            }
+            if (!ok || plans.length > AP_MAX_PLANS_PER_CYCLE) continue;
+            for (var key2 in work) budget[key2] = work[key2];
+            autopilot.drillCandidates = plans;
+            autopilot.drillLabel = String(tables.items.get(ranked[r]).localizedName);
+            return true;
+        }
+        return false;
+    };
+
+    var apFindMineTile = function (unit, core, team) {
+        if (!unit.canMine() || !unit.type.mineFloor) return null;
+        var win = apWindow(core, team);
+        var tables = apItemTables(core);
+        var available = [];
+        for (var a = 0; a < tables.names.length; a++) available.push(false);
+        for (var c = 0; c < win.ore.length; c++) {
+            var id = win.ore[c];
+            if (id >= 0 && autopilotIsMineWorthy(tables.names[id]) && unit.canMine(tables.items.get(id))) available[id] = true;
+        }
+        var maxDist = Math.min(AP_WINDOW_RADIUS, Math.floor(Vars.mineTransferRange / Vars.tilesize) - 3);
+        var ranked = autopilotRankItems(tables.names, tables.stock, available);
+        for (var r = 0; r < ranked.length; r++) {
+            var cell = autopilotNearestOreCell(win.size, win.size, win.cells, win.ore, ranked[r], AP_WINDOW_RADIUS, AP_WINDOW_RADIUS, maxDist);
+            if (cell >= 0) return Vars.world.tile(win.ox + cell % win.size, win.oy + Math.floor(cell / win.size));
+        }
+        return null;
+    };
+
+    var apQueue = function (unit, plans) {
+        Vars.control.input.isBuilding = true;
+        for (var i = 0; i < plans.length; i++) {
+            unit.addBuild(plans[i]);
+            autopilot.ownPlans.push(plans[i]);
+        }
+        autopilot.watchdog.success();
+    };
+
+    var apMine = function (unit) {
+        var tile = autopilot.mineCandidate;
+        if (!tile || unit.mineTile === tile) return;
+        apSetTarget(tile.worldx(), tile.worldy(), unit.type.mineRange * 0.6);
+        if (unit.validMine(tile)) {
+            unit.mineTile = tile;
+            autopilot.hasTarget = false;
+        }
+    };
+
+    var apRearm = function (unit, core) {
+        var range = Vars.itemTransferRange * 0.75;
+        var player = Vars.player;
+        if (autopilot.rearmStage === 0) autopilot.rearmStage = 1;
+        var target = autopilot.rearmTarget, item = autopilot.rearmItem;
+        if (!target || !target.isValid() || !item) { autopilot.rearmStage = 0; return; }
+        if (unit.stack.amount > 0 && unit.item() !== item) {
+            if (player.within(core, range)) Call.transferInventory(player, core);
+            else apSetTarget(core.x, core.y, range * 0.8);
+            autopilot.lastAction = "освобождаю руки у ядра";
+            return;
+        }
+        if (autopilot.rearmStage === 1) {
+            if (unit.stack.amount > 0) {
+                autopilot.rearmStage = 2;
+            } else if (player.within(core, range)) {
+                var amount = Math.min(unit.maxAccepted(item), core.items.get(item));
+                if (amount <= 0) {
+                    autopilot.rearmStage = 0;
+                    if (autopilot.watchdog.fail("rearm")) apFail("в ядре закончились патроны " + item.localizedName);
+                    return;
+                }
+                Call.requestItem(player, core, item, amount);
+                autopilot.rearmStage = 2;
+                autopilot.lastAction = "беру " + amount + " " + item.localizedName + " из ядра";
+                return;
+            } else {
+                apSetTarget(core.x, core.y, range * 0.8);
+                autopilot.lastAction = "лечу к ядру за патронами";
+                return;
+            }
+        }
+        if (autopilot.rearmStage === 2) {
+            if (unit.stack.amount <= 0) { autopilot.rearmStage = 0; return; }
+            if (player.within(target, range)) {
+                Call.transferInventory(player, target);
+                apAction("зарядил турель " + target.block.localizedName + " у " + target.tileX() + "," + target.tileY());
+                autopilot.watchdog.success();
+                autopilot.rearmStage = unit.stack.amount > 0 ? 3 : 0;
+            } else {
+                apSetTarget(target.x, target.y, range * 0.8);
+                autopilot.lastAction = "несу " + item.localizedName + " к турели";
+            }
+            return;
+        }
+        if (autopilot.rearmStage === 3) {
+            if (unit.stack.amount <= 0) {
+                autopilot.rearmStage = 0;
+            } else if (player.within(core, range)) {
+                Call.transferInventory(player, core);
+                autopilot.rearmStage = 0;
+            } else {
+                apSetTarget(core.x, core.y, range * 0.8);
+            }
+        }
+    };
+
+    var apThink = function (unit) {
+        var now = Time.time / 60;
+        var goal = apGoal();
+        if (goal && goal.captured) {
+            apHalt();
+            autopilot.state = autopilotTransition(autopilot.state, AP_CMD_CAPTURED);
+            autopilot.reason = "сектор захвачен ✅ — выберите следующий сектор на карте планеты";
+            apLog(autopilot.reason);
+            return;
+        }
+        var goalWhy = autopilotGoalProblem(goal);
+        if (goalWhy !== null) { apFail(goalWhy); return; }
+
+        if (!unit) {
+            if (autopilot.deadSinceSec < 0) autopilot.deadSinceSec = now;
+            if (now - autopilot.deadSinceSec > AP_RESPAWN_WAIT_SECONDS) {
+                apFail("юнит не возрождается " + AP_RESPAWN_WAIT_SECONDS + " с");
+                return;
+            }
+            autopilot.lastAction = "ждём возрождения юнита";
+            autopilot.rearmStage = 0;
+            return;
+        }
+        autopilot.deadSinceSec = -1;
+
+        var team = Vars.player.team();
+        var core = Vars.player.closestCore();
+        if (!core) { apFail("нет ядра"); return; }
+        var data = Vars.state.teams.get(team);
+
+        autopilot.ownPlans = autopilot.ownPlans.filter(function (plan) { return unit.plans.indexOf(plan, true) >= 0; });
+        var current = unit.plans.size > 0 ? unit.buildPlan() : null;
+        var built = Vars.state.stats ? (Vars.state.stats.buildingsBuilt || 0) : 0;
+        var token = built + ":" + unit.plans.size + ":" + (current ? Math.floor(current.progress * 999) : 0);
+        if (autopilot.watchdog.stalled(unit.plans.size > 0, token, now)) {
+            apCancelOwnPlans(unit);
+            apFail("строительство стоит " + AP_STALL_SECONDS + " с: не хватает ресурсов или место недоступно");
+            return;
+        }
+        if (unit.plans.size > 0) Vars.control.input.isBuilding = true;
+
+        var o = autopilotObservation({ playerAlive: true });
+        o.buildQueue = unit.plans.size;
+        o.rearmInProgress = autopilot.rearmStage !== 0 && !!autopilot.rearmTarget && autopilot.rearmTarget.isValid();
+        if (!o.rearmInProgress) autopilot.rearmStage = 0;
+
+        var budget = apBudget(core);
+        if (o.buildQueue === 0 && !o.rearmInProgress) {
+            o.rearmTargets = apFindRearmTarget(data, core) ? 1 : 0;
+            o.defenseSlots = apCollectDefense(lastPrediction, team, budget);
+            o.rebuildSlots = apCollectRebuild(data, team, budget);
+            o.drills = apCountDrills(data);
+            if (o.drills < AP_MAX_DRILLS) o.drillPossible = apCollectDrill(core, team, budget);
+            autopilot.mineCandidate = apFindMineTile(unit, core, team);
+            o.minePossible = !!autopilot.mineCandidate;
+        }
+
+        var rules = Vars.state.rules;
+        o.waves = !!rules.waves;
+        o.waveSending = !!rules.waveSending;
+        o.waveTimer = !!rules.waveTimer;
+        o.spawning = !!Vars.spawner.isSpawning();
+        o.enemies = Vars.state.enemies || 0;
+        o.wave = Vars.state.wave || 0;
+        o.winWave = rules.winWave || 0;
+        o.waveTimeSec = rules.waveTimer ? Vars.state.wavetime / 60 : -1;
+        o.secondsSinceWaveCall = now - autopilot.lastWaveCallSec;
+        var minHealth = 1;
+        for (var ci = 0; ci < data.cores.size; ci++) {
+            var c = data.cores.get(ci);
+            if (c.maxHealth > 0) minHealth = Math.min(minHealth, c.health / c.maxHealth);
+        }
+        o.coreHealthFrac = minHealth;
+        if (lastPrediction && lastPrediction.forecast) {
+            o.forecastAvailable = !!lastPrediction.forecast.available;
+            o.forecastFallWave = lastPrediction.forecast.fallWave || 0;
+            o.forecastCappedByWin = !!lastPrediction.forecast.cappedByWin;
+        }
+
+        var decision = autopilotDecide(o);
+        if (decision.action !== AP_MINE) apClearMining();
+        if (decision.action !== AP_MINE && decision.action !== AP_REARM) autopilot.hasTarget = false;
+
+        if (decision.action === AP_REARM) {
+            apRearm(unit, core);
+        } else if (decision.action === AP_DEFEND) {
+            apQueue(unit, autopilot.defenseCandidates);
+            apAction("оборона: " + autopilot.defenseCandidates.length + " построек · " + decision.reason);
+        } else if (decision.action === AP_REBUILD) {
+            apQueue(unit, autopilot.rebuildCandidates);
+            apAction("восстанавливаю " + autopilot.rebuildCandidates.length + " построек");
+        } else if (decision.action === AP_DRILL) {
+            apQueue(unit, autopilot.drillCandidates);
+            apAction("ставлю бур (" + autopilot.drillLabel + ") и конвейер: " + (autopilot.drillCandidates.length - 1) + " клеток");
+        } else if (decision.action === AP_MINE) {
+            apMine(unit);
+            var drop = autopilot.mineCandidate ? autopilot.mineCandidate.drop() : null;
+            autopilot.lastAction = "добываю " + (drop ? drop.localizedName : "руду") + " · " + decision.reason;
+        } else if (decision.action === AP_CALL_WAVE) {
+            Vars.logic.skipWave();
+            autopilot.lastWaveCallSec = now;
+            apAction("вызываю волну " + Vars.state.wave + " · " + decision.reason);
+        } else {
+            autopilot.lastAction = decision.reason;
+        }
+    };
+
+    var apUpdate = function () {
+        if (autopilot.state !== AP_RUNNING) return;
+        try {
+            if (!Vars.state || !Vars.state.isGame()) {
+                apHalt();
+                autopilot.state = AP_OFF;
+                autopilot.reason = "игра закрыта";
+                return;
+            }
+            var why = autopilotGuardReason(apGuard());
+            if (why !== null) { apFail(why); return; }
+            if (Vars.state.isPaused()) return;
+            var unit = apUnit();
+            if (unit) apSteer(unit);
+            if (Time.time < autopilot.nextDecision) return;
+            autopilot.nextDecision = Time.time + AP_DECISION_INTERVAL_TICKS;
+            apThink(unit);
+        } catch (err) {
+            logError("autopilot error", err);
+            apFail("непредвиденная ошибка: " + err);
+        }
+    };
+
+    try {
+        if (typeof Trigger !== "undefined") Events.run(Trigger.update, asRun(apUpdate));
+        if (typeof WorldLoadEvent !== "undefined") {
+            Events.on(WorldLoadEvent, asCons(function () {
+                if (autopilot.state === AP_RUNNING || autopilot.state === AP_PAUSED || autopilot.state === AP_NEEDS_HELP) {
+                    apHalt();
+                    autopilot.state = AP_OFF;
+                    autopilot.reason = "загружен мир/сохранение — проверьте сектор и включите автопилот снова";
+                    apLog(autopilot.reason);
+                } else if (autopilot.state === AP_COMPLETE) {
+                    autopilot.state = AP_OFF;
+                    autopilot.reason = "";
+                }
+                autopilot.lastAction = "";
+                autopilot.lastWaveCallSec = -1e9;
+                autopilot.rejectedSites = {};
+            }));
+        }
+        if (typeof SectorCaptureEvent !== "undefined") {
+            Events.on(SectorCaptureEvent, asCons(function () {
+                if (autopilot.state === AP_RUNNING || autopilot.state === AP_PAUSED) {
+                    apHalt();
+                    autopilot.state = autopilotTransition(autopilot.state, AP_CMD_CAPTURED);
+                    autopilot.reason = "сектор захвачен ✅ — выберите следующий сектор на карте планеты";
+                    apLog(autopilot.reason);
+                }
+            }));
+        }
+        if (typeof GameOverEvent !== "undefined") {
+            Events.on(GameOverEvent, asCons(function () {
+                if (autopilot.state === AP_RUNNING || autopilot.state === AP_PAUSED) apFail("игра окончена — ядро потеряно");
+            }));
+        }
+    } catch (err) {
+        logError("autopilot hooks unavailable", err);
+    }
+
     Events.on(ClientLoadEvent, asCons(function () {
         try {
             // hudGroup is only visible while a game is running.
@@ -2138,6 +3187,22 @@ if (typeof Vars !== "undefined" && typeof Events !== "undefined" && typeof Clien
                     statusLabel = panel.add("Сканирование...").color(Color.white).left().width(panelWidth).get();
                     try { statusLabel.setWrap(true); } catch (ignored) {}
                     panel.row();
+
+                    // Autopilot: status line and the three controls (off by default).
+                    try {
+                        autopilotLabel = panel.add(apStatusText()).left().width(panelWidth).get();
+                        try { autopilotLabel.setWrap(true); } catch (ignored) {}
+                        panel.row();
+                        panel.table(asCons(function (buttons) {
+                            buttons.defaults().height(30).growX().pad(1);
+                            buttons.button("▶ Автопилот", Styles.flatt, asRun(function () { apStart(); refreshRadar(); }));
+                            buttons.button("⏸ Пауза", Styles.flatt, asRun(function () { apPause(); refreshRadar(); }));
+                            buttons.button("■ Стоп", Styles.flatt, asRun(function () { apStop(); refreshRadar(); }));
+                        })).width(panelWidth).left();
+                        panel.row();
+                    } catch (err) {
+                        logError("autopilot controls unavailable", err);
+                    }
 
                     radarElement = extend(Packages.arc.scene.Element, {
                         draw: function () {

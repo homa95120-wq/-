@@ -22,6 +22,10 @@ let legendLabel = null;
 let legendCell = null;
 let radarElement = null;
 let radarCell = null;
+let autopilotLabel = null;
+const buttons = {};
+const eventHandlers = new Map();
+const triggerHandlers = [];
 let inGame = true;
 let unitEachThrows = false;
 const airBlock = { name: "air" };
@@ -52,6 +56,7 @@ function makeCell(getter) {
         bottom() { return cell; },
         growX() { return cell; },
         growY() { return cell; },
+        height() { return cell; },
         width(v) { if (v !== undefined) cell.widthValue = v; return cell; },
         size(w, h) {
             if (w !== undefined && h !== undefined) {
@@ -90,9 +95,15 @@ function makeTable() {
         update(fn) { t.updateFn = fn; return t; },
         table(style, consFn) {
             const sub = makeTable();
-            consFn(sub);
-            t.lastTable = sub;
+            const fn = typeof style === "function" ? style : consFn;
+            fn(sub);
+            if (typeof style !== "function") t.lastTable = sub;
             return sub;
+        },
+        width(v) { if (v !== undefined) t.widthValue = v; return t; },
+        button(text, style, listener) {
+            buttons[text] = listener;
+            return makeCell(null);
         },
         add(item) {
             if (typeof item === "string") {
@@ -103,6 +114,7 @@ function makeTable() {
                     statusLabel = label;
                     statusCell = cell;
                 }
+                if (item.includes("Автопилот")) autopilotLabel = label;
                 if (item.includes("Карта мира")) {
                     legendLabel = label;
                     legendCell = cell;
@@ -173,10 +185,18 @@ const sandbox = {
     ClientLoadEvent: class ClientLoadEvent {},
     Events: {
         on(eventClass, handler) {
-            assert.equal(eventClass, sandbox.ClientLoadEvent);
-            loadHandler = handler;
+            if (eventClass === sandbox.ClientLoadEvent) loadHandler = handler;
+            eventHandlers.set(eventClass, handler);
+        },
+        run(trigger, handler) {
+            assert.equal(trigger, sandbox.Trigger.update);
+            triggerHandlers.push(handler);
         }
     },
+    Trigger: { update: "update-trigger" },
+    WorldLoadEvent: class WorldLoadEvent {},
+    SectorCaptureEvent: class SectorCaptureEvent {},
+    GameOverEvent: class GameOverEvent {},
     StatusEffects: { boss: "boss-effect" },
     BlockGroup: { walls: "walls" },
     Vars: {
@@ -249,7 +269,7 @@ const sandbox = {
     Color: { white: "white", lightGray: "lightGray", valueOf: (s) => s },
     Styles: { black8: "black8" },
     Touchable: { disabled: "disabled", childrenOnly: "childrenOnly", enabled: "enabled" },
-    Log: { err: (msg) => logs.push(String(msg)) },
+    Log: { err: (msg) => logs.push(String(msg)), info: (msg) => logs.push(String(msg)) },
     Core: {
         settings: { getInt: () => 140 },
         graphics: { getWidth: () => 1920, getHeight: () => 1080 }
@@ -315,7 +335,7 @@ check("the HUD uses a larger map and a width-limited, wrapped text column", () =
     assert.equal(legendCell.widthValue, 390);
     assert.equal(legendLabel.wrapped, true);
     assert.match(legendLabel.text, /Клик по карте — выбрать участок/);
-    assert.match(legendLabel.text, /не строит автоматически/);
+    assert.match(legendLabel.text, /строит только включённый автопилот/);
 });
 
 check("the HUD shrinks automatically on narrow and short screens", () => {
@@ -410,6 +430,279 @@ check("a failure while reading the game state shows error and logs [campaign-rad
     rootTable.updateFn();
     assert.match(statusLabel.text, /Ошибка обновления/);
     assert.ok(logs.some((line) => line.includes("[campaign-radar]")), "no [campaign-radar] log line, got: " + logs.join(" | "));
+});
+
+// ------------------------------------------------------------ autopilot glue
+
+check("autopilot: off by default, with ▶ / ⏸ / ■ controls and hooks registered", () => {
+    assert.ok(autopilotLabel, "autopilot status label missing");
+    assert.match(autopilotLabel.text, /Автопилот: ВЫКЛ/);
+    for (const name of ["▶ Автопилот", "⏸ Пауза", "■ Стоп"]) {
+        assert.equal(typeof buttons[name], "function", "missing button " + name);
+    }
+    assert.equal(triggerHandlers.length, 1, "Trigger.update handler not registered");
+    assert.ok(eventHandlers.has(sandbox.WorldLoadEvent));
+    assert.ok(eventHandlers.has(sandbox.SectorCaptureEvent));
+    assert.ok(eventHandlers.has(sandbox.GameOverEvent));
+});
+
+check("autopilot: refuses to start outside a campaign and never touches the world", () => {
+    unitEachThrows = false;
+    buttons["▶ Автопилот"]();
+    assert.equal(sandbox.autopilot.state, sandbox.AP_OFF);
+    assert.match(autopilotLabel.text, /запуск невозможен: это не кампания/);
+});
+
+// A small synthetic Serpulo sector: 3x3 core at tiles 50..52, copper ore at 60..61 x 51..52.
+class Drill { constructor(props) { Object.assign(this, props); } }
+class ItemTurret { constructor(props) { Object.assign(this, props); } }
+class CoreBlock { constructor(props) { Object.assign(this, props); } }
+class BuildPlan {
+    constructor(x, y, rotation, block, config) {
+        this.x = x; this.y = y; this.rotation = rotation; this.block = block; this.config = config; this.progress = 0;
+    }
+    drawx() { return this.x * 8; }
+    drawy() { return this.y * 8; }
+}
+class Vec2 {
+    constructor() { this.x = 0; this.y = 0; }
+    set(x, y) { this.x = x; this.y = y; return this; }
+    setLength(len) { const l = Math.hypot(this.x, this.y) || 1; this.x *= len / l; this.y *= len / l; return this; }
+    angle() { return Math.atan2(this.y, this.x) * 180 / Math.PI; }
+}
+function makeQueue(items) {
+    return {
+        items,
+        get size() { return items.length; },
+        first() { return items[0]; },
+        indexOf(value) { return items.indexOf(value); },
+        remove(value) { const i = items.indexOf(value); if (i >= 0) items.splice(i, 1); return i >= 0; },
+        iterator() { let i = 0; return { hasNext: () => i < items.length, next: () => items[i++] }; }
+    };
+}
+function block(name, props) {
+    return Object.assign({
+        name, size: 1, requirements: [{ item: copper, amount: 1 }],
+        unlockedNow: () => true, isPlaceable: () => true, environmentBuildable: () => true
+    }, props);
+}
+const copper = { id: 0, name: "copper", hardness: 1, localizedName: "Медь" };
+const lead = { id: 1, name: "lead", hardness: 1, localizedName: "Свинец" };
+const air = sandbox.Packages.mindustry.content.Blocks.air;
+const coreBlock = new CoreBlock({ name: "core-shard", size: 3 });
+const coreItems = { 0: 400, 1: 100 };
+const mainCore = {
+    x: 51 * 8, y: 51 * 8, health: 1000, maxHealth: 1000, power: null, team: "player", block: coreBlock,
+    isValid: () => true, tileX: () => 51, tileY: () => 51,
+    items: { get: (item) => coreItems[item.id] || 0, total: () => 500 },
+    dst(other) { return Math.hypot(other.x - this.x, other.y - this.y); }
+};
+const placed = new Set();
+function isCoreTile(x, y) { return x >= 50 && x <= 52 && y >= 50 && y <= 52; }
+const unitPlans = [];
+const moves = [];
+const playerUnit = {
+    x: 51 * 8, y: 54 * 8, mineTile: null,
+    plans: makeQueue(unitPlans),
+    stack: { amount: 0 },
+    type: { buildRange: 220, mineRange: 70, mineFloor: true },
+    isValid: () => true,
+    canBuild: () => true,
+    canMine: (item) => item === undefined ? true : item.hardness <= 1,
+    buildPlan() { return unitPlans[0] || null; },
+    addBuild(plan) { unitPlans.push(plan); },
+    validMine(tile) { return Math.hypot(tile.worldx() - this.x, tile.worldy() - this.y) <= 70; },
+    speed: () => 3,
+    movePref(v) { moves.push([v.x, v.y]); },
+    lookAt() {},
+    item: () => null,
+    maxAccepted: () => 30
+};
+const calls = { skipWave: 0 };
+let netActive = false;
+
+function installSector() {
+    Object.assign(sandbox, {
+        Drill, ItemTurret, BuildPlan, Vec2,
+        Blocks: {
+            air,
+            conveyor: block("conveyor"),
+            copperWall: block("copper-wall", { requirements: [{ item: copper, amount: 6 }] }),
+            duo: block("duo", { requirements: [{ item: copper, amount: 35 }] }),
+            scatter: block("scatter", { size: 2, requirements: [{ item: copper, amount: 85 }, { item: lead, amount: 45 }] }),
+            mechanicalDrill: new Drill(block("mechanical-drill", { size: 2, tier: 2, requirements: [{ item: copper, amount: 12 }] })),
+            pneumaticDrill: new Drill(block("pneumatic-drill", { size: 2, tier: 3, unlockedNow: () => false }))
+        },
+        Build: {
+            validPlace(b, team, x, y) {
+                const o = -Math.floor((b.size - 1) / 2);
+                for (let dx = 0; dx < b.size; dx++) for (let dy = 0; dy < b.size; dy++) {
+                    const tx = x + o + dx, ty = y + o + dy;
+                    if (tx < 0 || ty < 0 || tx >= 300 || ty >= 200 || isCoreTile(tx, ty) || placed.has(tx + "," + ty)) return false;
+                }
+                return true;
+            }
+        },
+        Call: { transferInventory() {}, requestItem() {} }
+    });
+    sandbox.Packages.mindustry.world = { blocks: { storage: { CoreBlock } } };
+    sandbox.Vars.world.tile = (x, y) => {
+        if (x < 0 || y < 0 || x >= 300 || y >= 200) return null;
+        const ore = x >= 60 && x <= 61 && y >= 51 && y <= 52 ? copper : null;
+        return {
+            x, y,
+            build: isCoreTile(x, y) ? mainCore : null,
+            block: () => air,
+            drop: () => ore,
+            floor: () => ({ isLiquid: false }),
+            worldx: () => x * 8,
+            worldy: () => y * 8
+        };
+    };
+    Object.assign(sandbox.Vars, {
+        net: { active: () => netActive },
+        control: { input: { isBuilding: false } },
+        logic: { skipWave: () => { calls.skipWave++; } },
+        content: { items: () => ({ size: 2, get: (i) => [copper, lead][i] }) },
+        mineTransferRange: 220, itemTransferRange: 220, tilesize: 8
+    });
+    sandbox.Vars.spawner.isSpawning = () => false;
+    Object.assign(sandbox.Vars.state, {
+        isCampaign: () => true,
+        isPaused: () => false,
+        gameOver: false,
+        enemies: 0,
+        wave: 2,
+        getPlanet: () => ({ name: "serpulo", campaignRules: { difficulty: { name: () => "normal" } } })
+    });
+    Object.assign(sandbox.Vars.state.rules, {
+        waves: true, waveSending: true, waveTimer: false, winWave: 10, attackMode: false,
+        buildCostMultiplier: 1, sector: { info: { wasCaptured: false } }
+    });
+    sandbox.Vars.state.teams.get = () => ({
+        cores: { size: 1, get: () => mainCore },
+        buildings: { size: 0, get: () => null },
+        plans: makeQueue([])
+    });
+    Object.assign(sandbox.Vars.player, {
+        unit: () => playerUnit,
+        dead: () => false,
+        closestCore: () => mainCore,
+        within(target, range) { return Math.hypot(target.x - playerUnit.x, target.y - playerUnit.y) <= range; }
+    });
+}
+
+function tick(ticks, prediction) {
+    sandbox.Time.time += ticks;
+    // Isolate the autopilot from the radar refresh unless a test supplies a prediction.
+    sandbox.lastPrediction = prediction || null;
+    triggerHandlers[0]();
+}
+
+check("autopilot: starts in a Normal Serpulo campaign sector", () => {
+    installSector();
+    buttons["▶ Автопилот"]();
+    assert.equal(sandbox.autopilot.state, sandbox.AP_RUNNING, sandbox.autopilot.reason);
+    assert.match(autopilotLabel.text, /Автопилот: РАБОТАЕТ/);
+});
+
+check("autopilot: places a mechanical drill on copper with a conveyor line into the core", () => {
+    tick(100);
+    assert.equal(unitPlans.length, 8, "plans: " + JSON.stringify(unitPlans.map((p) => [p.block.name, p.x, p.y, p.rotation])));
+    assert.equal(unitPlans[0].block.name, "mechanical-drill");
+    assert.deepEqual([unitPlans[0].x, unitPlans[0].y], [60, 51]);
+    const line = unitPlans.slice(1);
+    assert.ok(line.every((p) => p.block.name === "conveyor" && p.rotation === 2 && p.y === 51));
+    assert.deepEqual(line.map((p) => p.x), [59, 58, 57, 56, 55, 54, 53]);
+    assert.equal(sandbox.Vars.control.input.isBuilding, true);
+    assert.match(sandbox.autopilot.lastAction, /ставлю бур \(Медь\) и конвейер: 7 клеток/);
+});
+
+check("autopilot: flies to the queued plan and waits while building", () => {
+    moves.length = 0;
+    tick(1);
+    assert.equal(moves.length, 0, "already within build range: no movement");
+    playerUnit.x = 10 * 8; // far west of the drill
+    tick(1);
+    assert.ok(moves.length > 0, "the unit was not steered");
+    assert.ok(moves[0][0] > 0, "the unit should fly east toward the drill");
+    tick(100);
+    assert.match(sandbox.autopilot.lastAction, /строится: 8/);
+});
+
+check("autopilot: a stalled build queue stops with a reason and cancels its own plans", () => {
+    tick(60 * 50);
+    tick(60 * 50);
+    assert.equal(sandbox.autopilot.state, sandbox.AP_NEEDS_HELP);
+    assert.match(sandbox.autopilot.reason, /строительство стоит/);
+    assert.equal(unitPlans.length, 0);
+    assert.match(sandbox.apStatusText(), /НУЖНА ПОМОЩЬ/);
+});
+
+check("autopilot: calls manual waves when the base has nothing left to build", () => {
+    // The drill is "built": its tiles are occupied now and the line is done.
+    for (let x = 53; x <= 61; x++) { placed.add(x + ",51"); placed.add(x + ",52"); }
+    coreItems[0] = 45; // below reserve + drill cost: no new drill
+    buttons["▶ Автопилот"]();
+    assert.equal(sandbox.autopilot.state, sandbox.AP_RUNNING);
+    tick(100);
+    assert.equal(calls.skipWave, 1, sandbox.autopilot.lastAction);
+    assert.match(sandbox.autopilot.lastAction, /вызываю волну/);
+    tick(100);
+    assert.equal(calls.skipWave, 1, "the cooldown must prevent a second call");
+});
+
+check("autopilot: a weak ground approach gets Duo turrets first, facing the spawn", () => {
+    coreItems[0] = 400;
+    const prediction = {
+        weakPoints: [{ kind: sandbox.MARKER_GROUND, tileX: 80, tileY: 51, severity: 0.9 }],
+        spawns: [{ x: 150 * 8, y: 51 * 8 }],
+        blips: [],
+        mapWidthTiles: 300,
+        mapHeightTiles: 200,
+        forecast: { available: true, fallWave: 0 }
+    };
+    tick(100, prediction);
+    assert.equal(unitPlans.length, 4, sandbox.autopilot.lastAction);
+    assert.ok(unitPlans.every((p) => p.block.name === "duo"));
+    assert.ok(unitPlans.every((p) => Math.abs(p.x - 80) <= 1 && Math.abs(p.y - 51) <= 1));
+    assert.match(sandbox.autopilot.lastAction, /оборона: 4 построек/);
+    unitPlans.length = 0;
+});
+
+check("autopilot: pause stops actions, stop turns it off", () => {
+    buttons["⏸ Пауза"]();
+    assert.equal(sandbox.autopilot.state, sandbox.AP_PAUSED);
+    const before = calls.skipWave;
+    tick(60 * 60);
+    assert.equal(calls.skipWave, before);
+    buttons["■ Стоп"]();
+    assert.equal(sandbox.autopilot.state, sandbox.AP_OFF);
+    assert.match(sandbox.apStatusText(), /остановлен игроком/);
+});
+
+check("autopilot: a network game stops it immediately", () => {
+    buttons["▶ Автопилот"]();
+    assert.equal(sandbox.autopilot.state, sandbox.AP_RUNNING);
+    netActive = true;
+    tick(1);
+    assert.equal(sandbox.autopilot.state, sandbox.AP_NEEDS_HELP);
+    assert.match(sandbox.autopilot.reason, /сетевая игра/);
+    netActive = false;
+});
+
+check("autopilot: loading a save never resumes automatically", () => {
+    buttons["▶ Автопилот"]();
+    eventHandlers.get(sandbox.WorldLoadEvent)();
+    assert.equal(sandbox.autopilot.state, sandbox.AP_OFF);
+    assert.match(sandbox.autopilot.reason, /загружен мир/);
+});
+
+check("autopilot: sector capture finishes the run", () => {
+    buttons["▶ Автопилот"]();
+    eventHandlers.get(sandbox.SectorCaptureEvent)();
+    assert.equal(sandbox.autopilot.state, sandbox.AP_COMPLETE);
+    assert.match(sandbox.apStatusText(), /СЕКТОР ЗАХВАЧЕН/);
 });
 
 console.log("\n" + passed + "/" + passed + " checks passed");

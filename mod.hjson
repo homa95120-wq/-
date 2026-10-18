@@ -1,8 +1,8 @@
 name: campaign-threat-radar
 displayName: Campaign Threat Radar
 author: local
-description: Client-only campaign tactical radar: whole-map tactical view (all cores, spawns, enemies and weak sectors), realistic approach ETA, wave survival forecast, prioritized build advice, and a terrain-aware selectable defense plan (recommendations only).
-version: 1.7
+description: Client-only campaign tactical radar: whole-map tactical view (all cores, spawns, enemies and weak sectors), realistic approach ETA, wave survival forecast, prioritized build advice, a terrain-aware selectable defense plan, and an optional off-by-default stage-1 autopilot that captures one local single-player Serpulo sector on Normal (pause/stop always available).
+version: 1.8
 minGameVersion: 154
 main: campaignradar.CampaignThreatRadar
 java: true

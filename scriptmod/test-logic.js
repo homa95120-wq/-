@@ -763,4 +763,159 @@ check("plural of the enemy word", () => {
     assert.equal(foeWord(21), "враг");
 });
 
+// ---------------------------------------------------------------- autopilot (pure logic)
+// Same scenarios as src/test/java/campaignradar/AutopilotLogicCheck.java.
+{
+    const ap = require("./scripts/main.js");
+    const okGuard = (o) => Object.assign({ inGame: true, campaign: true, planet: "serpulo", difficulty: "normal" }, o);
+
+    check("autopilot guard: only a local Normal Serpulo campaign", () => {
+        assert.equal(ap.autopilotGuardReason(okGuard()), null);
+        assert.match(ap.autopilotGuardReason(okGuard({ netActive: true })), /сетевая/);
+        assert.match(ap.autopilotGuardReason(okGuard({ planet: "erekir" })), /Serpulo/);
+        assert.match(ap.autopilotGuardReason(okGuard({ difficulty: "hard" })), /Normal/);
+        assert.match(ap.autopilotGuardReason(okGuard({ campaign: false })), /кампания/);
+        assert.match(ap.autopilotGuardReason({}), /игры/);
+        assert.notEqual(ap.autopilotGuardReason(okGuard({ canBuild: false })), null);
+    });
+
+    check("autopilot state machine", () => {
+        const t = ap.autopilotTransition;
+        assert.equal(t(ap.AP_OFF, ap.AP_CMD_START), ap.AP_RUNNING);
+        assert.equal(t(ap.AP_RUNNING, ap.AP_CMD_PAUSE), ap.AP_PAUSED);
+        assert.equal(t(ap.AP_PAUSED, ap.AP_CMD_START), ap.AP_RUNNING);
+        assert.equal(t(ap.AP_OFF, ap.AP_CMD_PAUSE), ap.AP_OFF);
+        assert.equal(t(ap.AP_NEEDS_HELP, ap.AP_CMD_STOP), ap.AP_OFF);
+        assert.equal(t(ap.AP_RUNNING, ap.AP_CMD_FAIL), ap.AP_NEEDS_HELP);
+        assert.equal(t(ap.AP_OFF, ap.AP_CMD_FAIL), ap.AP_OFF);
+        assert.equal(t(ap.AP_RUNNING, ap.AP_CMD_CAPTURED), ap.AP_COMPLETE);
+    });
+
+    check("autopilot goal: survival sectors only in stage 1", () => {
+        assert.equal(ap.autopilotGoalProblem({ waves: true, winWave: 15 }), null);
+        assert.match(ap.autopilotGoalProblem({ waves: true, winWave: 15, attackMode: true }), /базу/);
+        assert.match(ap.autopilotGoalProblem({ waves: true, winWave: 0 }), /волны победы/);
+        assert.equal(ap.autopilotGoalProblem({ captured: true }), null);
+    });
+
+    const calm = (o) => ap.autopilotObservation(Object.assign({
+        waves: true, waveSending: true, waveTimer: true, wave: 3, winWave: 15, waveTimeSec: 90, minePossible: true
+    }, o));
+
+    check("autopilot decide: priority order", () => {
+        const d = (o) => ap.autopilotDecide(calm(o)).action;
+        assert.equal(d({ captured: true }), ap.AP_DONE);
+        assert.equal(d({ playerAlive: false }), ap.AP_WAIT);
+        assert.equal(d({ buildQueue: 3, rearmTargets: 1 }), ap.AP_WAIT);
+        assert.equal(d({ buildQueue: 3, rearmInProgress: true }), ap.AP_REARM);
+        assert.equal(d({ rearmTargets: 1, defenseSlots: 4 }), ap.AP_REARM);
+        assert.equal(d({ defenseSlots: 4, rebuildSlots: 2 }), ap.AP_DEFEND);
+        assert.equal(d({ rebuildSlots: 2, drillPossible: true }), ap.AP_REBUILD);
+        assert.equal(d({ drillPossible: true }), ap.AP_DRILL);
+        assert.equal(d({ drillPossible: true, drills: ap.AP_MAX_DRILLS }), ap.AP_MINE);
+        assert.equal(d({ minePossible: false }), ap.AP_WAIT);
+    });
+
+    check("autopilot waves: manual and timed calls follow the forecast", () => {
+        const p = (o) => ap.autopilotWaveCallProblem(calm(o));
+        const manual = { waveTimer: false, waveTimeSec: -1, forecastAvailable: true };
+        assert.equal(p(Object.assign({ forecastFallWave: 0 }, manual)), null);
+        assert.equal(ap.autopilotDecide(calm(Object.assign({ forecastFallWave: 0 }, manual))).action, ap.AP_CALL_WAVE);
+        assert.notEqual(p(Object.assign({ forecastFallWave: 4 }, manual)), null);
+        assert.equal(p(Object.assign({ forecastFallWave: 5 }, manual)), null);
+        assert.match(p(Object.assign({ forecastFallWave: 5, enemies: 2 }, manual)), /бой/);
+        assert.notEqual(p({ forecastAvailable: true, forecastFallWave: 6 }), null);
+        assert.equal(p({ forecastAvailable: true, forecastFallWave: 7 }), null);
+        assert.match(p({ forecastAvailable: true, forecastFallWave: 7, waveTimeSec: 10 }), /скоро/);
+        assert.notEqual(p({ forecastAvailable: false }), null);
+        assert.match(p({ wave: 15 }), /захвата/);
+        assert.match(p({ waveTimer: false, coreHealthFrac: 0.5 }), /ядро/);
+        assert.match(p({ waveTimer: false, secondsSinceWaveCall: 5 }), /пауза/);
+    });
+
+    check("autopilot watchdog: stalls and repeated failures", () => {
+        const w = new ap.AutopilotWatchdog();
+        assert.equal(w.stalled(true, 10, 0), false);
+        assert.equal(w.stalled(true, 10, ap.AP_STALL_SECONDS - 1), false);
+        assert.equal(w.stalled(true, 10, ap.AP_STALL_SECONDS + 1), true);
+        assert.equal(w.stalled(true, 11, ap.AP_STALL_SECONDS + 2), false);
+        assert.equal(w.stalled(false, 11, 500), false);
+        let tripped = false;
+        for (let i = 0; i < ap.AP_MAX_FAILURES; i++) tripped = w.fail("x");
+        assert.equal(tripped, true);
+        w.success();
+        assert.equal(w.fail("x"), false);
+    });
+
+    check("autopilot economy: ranking, hand-mining and size offsets", () => {
+        assert.deepEqual(ap.autopilotRankItems(["copper", "lead", "sand", "coal"], [500, 100, 0, 0], [true, true, true, false]), [2, 1, 0]);
+        assert.ok(ap.autopilotIsMineWorthy("copper") && !ap.autopilotIsMineWorthy("sand"));
+        assert.equal(ap.autopilotSizeOffset(2), 0);
+        assert.equal(ap.autopilotSizeOffset(3), -1);
+    });
+
+    // 12x6 window, core at x 0..2, y 1..3; copper ore 2x2 at x 8..9, y 2..3.
+    const W = 12, H = 6;
+    const grid = () => {
+        const cells = new Array(W * H).fill(ap.AP_CELL_FREE);
+        const ore = new Array(W * H).fill(-1);
+        for (let y = 1; y <= 3; y++) for (let x = 0; x <= 2; x++) cells[y * W + x] = ap.AP_CELL_CORE;
+        for (let y = 2; y <= 3; y++) for (let x = 8; x <= 9; x++) ore[y * W + x] = 0;
+        return { cells, ore };
+    };
+
+    check("autopilot drill: ore patch, shortest straight conveyor into the core", () => {
+        const { cells, ore } = grid();
+        const site = ap.autopilotFindDrillSite(W, H, cells, ore, 0, 2, ap.AP_MAX_CONVEYOR_PATH);
+        assert.deepEqual([site.x, site.y, site.ore, site.pathLength], [8, 2, 4, 5]);
+        const xs = [], rots = [];
+        for (let s = 0; s < site.pathLength; s++) { xs.push(site.path[s * 3]); rots.push(site.path[s * 3 + 2]); }
+        assert.deepEqual(xs, [7, 6, 5, 4, 3]);
+        assert.ok(rots.every((r) => r === 2));
+        assert.equal(ap.autopilotFindDrillSite(W, H, cells, ore, 1, 2, ap.AP_MAX_CONVEYOR_PATH), null);
+        assert.equal(ap.autopilotFindDrillSite(W, H, cells, ore, 0, 2, 3), null);
+    });
+
+    check("autopilot drill: obstacles, adjacency to the core and mixed ore", () => {
+        const { cells, ore } = grid();
+        const blocked = cells.slice();
+        for (let y = 0; y < H; y++) blocked[y * W + 5] = ap.AP_CELL_BLOCKED;
+        assert.equal(ap.autopilotFindDrillSite(W, H, blocked, ore, 0, 2, ap.AP_MAX_CONVEYOR_PATH), null);
+        blocked[5] = ap.AP_CELL_FREE;
+        const around = ap.autopilotFindDrillSite(W, H, blocked, ore, 0, 2, ap.AP_MAX_CONVEYOR_PATH);
+        assert.ok(around && around.pathLength > 5);
+        for (let s = 0; s < around.pathLength; s++) {
+            const x = around.path[s * 3], y = around.path[s * 3 + 1], r = around.path[s * 3 + 2];
+            assert.equal(blocked[y * W + x], ap.AP_CELL_FREE);
+            assert.ok(!(x >= 8 && x <= 9 && y >= 2 && y <= 3));
+            if (s + 1 < around.pathLength) {
+                const nx = x + (r === 0 ? 1 : r === 2 ? -1 : 0), ny = y + (r === 1 ? 1 : r === 3 ? -1 : 0);
+                assert.deepEqual([nx, ny], [around.path[(s + 1) * 3], around.path[(s + 1) * 3 + 1]]);
+            }
+        }
+        const adjacent = new Array(W * H).fill(-1);
+        for (let y = 1; y <= 2; y++) for (let x = 3; x <= 4; x++) adjacent[y * W + x] = 0;
+        const touching = ap.autopilotFindDrillSite(W, H, cells, adjacent, 0, 2, ap.AP_MAX_CONVEYOR_PATH);
+        assert.equal(touching.pathLength, 0);
+        assert.equal(touching.path.length, 0);
+        const mixed = ore.slice();
+        mixed[2 * W + 8] = 1;
+        mixed[3 * W + 8] = 1;
+        assert.equal(ap.autopilotFindDrillSite(W, H, cells, mixed, 0, 2, ap.AP_MAX_CONVEYOR_PATH), null);
+        assert.equal(ap.autopilotNearestOreCell(W, H, cells, ore, 0, 1, 2, 10), 2 * W + 8);
+        assert.equal(ap.autopilotNearestOreCell(W, H, cells, ore, 0, 1, 2, 5), -1);
+    });
+
+    check("autopilot defence order and status text", () => {
+        const kinds = [PLAN_WALL, PLAN_DUO, PLAN_SCATTER, PLAN_MENDER, PLAN_DUO];
+        assert.deepEqual(ap.autopilotDefenseOrder(MARKER_GROUND, kinds), [1, 4, 0, 2]);
+        assert.equal(ap.autopilotDefenseOrder(MARKER_AIR, kinds)[0], 2);
+        assert.equal(ap.autopilotDefenseOrder(MARKER_WALL, kinds)[0], 0);
+        assert.deepEqual(ap.autopilotDefenseOrder(MARKER_SUPPLY, kinds), []);
+        assert.match(ap.autopilotFormatStatus(ap.AP_OFF, "", ""), /ВЫКЛ/);
+        assert.match(ap.autopilotFormatStatus(ap.AP_RUNNING, "", "ставлю бур"), /ставлю бур/);
+        assert.match(ap.autopilotFormatStatus(ap.AP_NEEDS_HELP, "нет ядра", "x"), /нет ядра/);
+    });
+}
+
 console.log("\n" + passed + "/" + passed + " checks passed");

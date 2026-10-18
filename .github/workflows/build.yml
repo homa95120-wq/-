@@ -1,6 +1,9 @@
 name: Build Mod
 
-on: [push, pull_request]
+on:
+  push:
+    branches: ['**']   # release tags are handled by release.yml
+  pull_request:
 
 jobs:
   buildJar:
@@ -23,15 +26,31 @@ jobs:
       - name: Verify jar contents
         run: |
           jar tf build/libs/CampaignThreatRadar.jar
-          jar tf build/libs/CampaignThreatRadar.jar | grep -q 'mod.hjson'
-          jar tf build/libs/CampaignThreatRadar.jar | grep -q 'campaignradar/CampaignThreatRadar.class'
+          # -x: the line must match exactly, i.e. mod.hjson sits in the archive
+          # root and not inside a wrapper folder.
+          jar tf build/libs/CampaignThreatRadar.jar | grep -qx 'mod.hjson'
+          jar tf build/libs/CampaignThreatRadar.jar | grep -qx 'campaignradar/CampaignThreatRadar.class'
           unzip -p build/libs/CampaignThreatRadar.jar campaignradar/CampaignThreatRadar.class \
             | head -c 8 | od -An -t u1 \
             | awk '{ if ($8 == 61) print "class file version 61 (Java 17): OK"; else { print "unexpected class version: " $8; exit 1 } }'
 
+      - name: Print jar size and checksum
+        run: |
+          cd build/libs
+          {
+            echo "### CampaignThreatRadar.jar"
+            echo ''
+            echo '```'
+            stat -c '%s bytes' CampaignThreatRadar.jar
+            sha256sum CampaignThreatRadar.jar
+            echo '```'
+            echo 'Сравните SHA-256 со скачанным файлом: `certutil -hashfile CampaignThreatRadar.jar SHA256` (Windows).'
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Upload built jar file
         uses: actions/upload-artifact@v7
         with:
-          archive: false
+          archive: false          # upload the .jar as-is, GitHub must not wrap it in a zip
           name: CampaignThreatRadar
           path: build/libs/CampaignThreatRadar.jar
+          if-no-files-found: error

@@ -1,6 +1,7 @@
 name: campaign-threat-radar-zip
 displayName: Campaign Threat Radar (ZIP)
 author: local
-description: Client-only campaign HUD showing enemy units and likely approach to your cores. Script (ZIP) version - do not enable together with the Java jar.
-version: 1.1
+description: Client-only campaign tactical radar showing enemy unit counts, approach ETA, boss alerts, core status, power deficits, and defense diagnostics. Script (ZIP) version - do not enable together with the Java jar.
+version: 1.2
 minGameVersion: 154
+hidden: true

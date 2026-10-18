@@ -3,7 +3,7 @@ plugins {
 }
 
 group = 'campaignradar'
-version = '1.1'
+version = '1.2'
 
 // Mindustry v8 release to compile against. The game's own Java mod template
 // pulls its classes from the "dependencies.jar" attached to Mindustry's

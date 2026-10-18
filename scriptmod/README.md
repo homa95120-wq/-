@@ -7,10 +7,10 @@ no Gradle) and dropped into the `mods` folder as-is.
 
 | File | Purpose |
 |---|---|
-| `mod.hjson` | Meta for the script mod. Internal name `campaign-threat-radar-zip`, **no** `main` and **no** `java: true` - with either of those the loader would treat the archive as a Java mod and fail to find the class. |
-| `scripts/main.js` | The mod. Pure logic + a small adapter over `Vars`/`Groups` + HUD registration. |
+| `mod.hjson` | Meta for the script mod. Internal name `campaign-threat-radar-zip`, `hidden: true`, **no** `main` and **no** `java: true` - with either of those the loader would treat the archive as a Java mod and fail to find the class. |
+| `scripts/main.js` | The mod. Pure logic + diagnostic radar algorithm + HUD registration at top-right (left of minimap). |
 | `build.py` | Builds `../dist/CampaignThreatRadar.zip` (exactly `mod.hjson` + `scripts/main.js` in the archive root, reproducible bytes). |
-| `test-logic.js` | 13 offline checks of the pure logic (`node scriptmod/test-logic.js`). |
+| `test-logic.js` | 15 offline checks of the pure logic (`node scriptmod/test-logic.js`). |
 | `test-hud.js` | Mock harness for the HUD glue: fires `ClientLoadEvent` against fake game globals (`node scriptmod/test-hud.js`). Catches typos in the glue, not Rhino-specific behaviour. |
 
 Build and test:
@@ -32,8 +32,5 @@ Verified against the game sources (v160.7), not guessed:
 - A script mod must not set `main`/`java` (`LoadedMod.isJava()`), and
   its internal name must differ from the Java mod's, or the second one
   is refused with "A mod with the name ... is already imported".
-
-**Not tested in a running game yet.** The Java jar from the release is
-the proven build; this ZIP is the fallback. Do not enable both at once
-(you would get two panels). On failure the panel shows `Radar error`
-and the log (`last_log.txt`, grep for `[campaign-radar]`) says why.
+- `hidden: true` makes the mod purely client-side: it is not required
+  on multiplayer servers, so joining any server is seamless.

@@ -259,23 +259,25 @@ check("the panel keeps a clear gap to the left of the vanilla minimap", () => {
 });
 
 check("one enemy heading to the core shows count, threats and warning", () => {
-    assert.match(statusLabel.text, /Враги:.*1/);
-    assert.match(statusLabel.text, /ПРОРЫВ: 1 к ядру · ETA \d+–\d+с/);
+    assert.match(statusLabel.text, /👾\[accent\] 1/);
+    assert.match(statusLabel.text, /ПРОРЫВ 1 к ядру · ETA \d+–\d+с/);
 });
 
 check("dead and friendly units are not counted", () => {
     // The mock provides three units, only one of them is a living enemy.
-    assert.doesNotMatch(statusLabel.text, /Враги:.*2/);
+    assert.doesNotMatch(statusLabel.text, /👾\[accent\] 2/);
 });
 
 check("wave status, survival forecast and next wave preview come from the spawn rules", () => {
     assert.match(statusLabel.text, /🌊 Волна 3/);
     assert.match(statusLabel.text, /след\. через 1:05/);
     // Next spawn index is state.wave - 1 = 2, displayed as wave 4 with 4 Daggers.
-    assert.match(statusLabel.text, /🌊 Волна 4: 4 враг\. .*4×Dagger/);
-    assert.match(statusLabel.text, /🏰 Прогноз:/);
-    assert.match(statusLabel.text, /🧭 Усилить (В|СВ) \(\d+,\d+\): мало урона по земле/);
-    assert.match(statusLabel.text, /📈 Убито 12 · построено 20 · потеряно 1 · юнитов созд\. 3/);
+    assert.match(statusLabel.text, /🌊 след\. волна 4: 4 врага .*4×Dagger/);
+    assert.match(statusLabel.text, /🏰/);
+    assert.match(statusLabel.text, /1\)\[\] \[\w+\]ТУРЕЛЬ\[lightgray\] · (В|СВ) \d+,\d+ — по земле/);
+    // The session counters are not shown any more, the base line is.
+    assert.doesNotMatch(statusLabel.text, /Убито/);
+    assert.match(statusLabel.text, /🏭/);
 });
 
 check("the whole-map mini map draws without throwing", () => {

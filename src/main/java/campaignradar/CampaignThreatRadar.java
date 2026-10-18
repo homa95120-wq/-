@@ -578,7 +578,19 @@ public class CampaignThreatRadar extends Mod{
         /** Compass direction of the marker seen from its core, in Russian. */
         public String direction = "";
         public float groundDps, airDps, wallHp, healthPct = 100f;
+        /** How much is missing here: DPS, air DPS and wall HP. */
+        public float needGround, needAir, needWall;
         public int wallCount, turretCount, tileX, tileY;
+    }
+
+    /** A concrete instruction for one weak point: what to build and how much. */
+    public static class Advice{
+        /** What to do, e.g. "ПВО". */
+        public String action = "";
+        /** Markup colour of the action, the same colour the map uses. */
+        public String color = "white";
+        /** Short reason with numbers, e.g. "нет турелей по воздуху". */
+        public String detail = "";
     }
 
     /** One simulated wave, built from the spawn rules before the wave exists. */
@@ -1268,6 +1280,10 @@ public class CampaignThreatRadar extends Mod{
                     marker.wallHp = wallHp;
                     marker.wallCount = wallCount;
                     marker.turretCount = coveringTurrets;
+                    // How much is missing here - the list tells the player what to build.
+                    marker.needGround = Math.max(0f, requiredGround - groundDps);
+                    marker.needAir = requiredAir > 0f ? Math.max(0f, requiredAir - airDps) : 0f;
+                    marker.needWall = Math.max(0f, requiredWallHp - wallHp);
                     marker.healthPct = damagedMaxHp > 0f ? damagedHp / damagedMaxHp * 100f : 100f;
                     marker.tileX = Math.round(markerX / TILE_SIZE);
                     marker.tileY = Math.round(markerY / TILE_SIZE);
@@ -1355,16 +1371,16 @@ public class CampaignThreatRadar extends Mod{
         }
 
         StringBuilder text = new StringBuilder();
-        text.append("[gold]РАДАР КАМПАНИИ[] [lightgray]v1.4[]\n");
+        text.append("[gold]РАДАР КАМПАНИИ[] [lightgray]v1.5[]\n");
 
-        // Wave status
+        // --- wave status -----------------------------------------------------
         if(p.hasWaves && p.wave > 0){
             text.append("[accent]🌊 Волна ").append(p.wave).append("[]");
             if(p.winWave > 0){
                 text.append("[lightgray]/").append(p.winWave).append("[]");
             }
             if(p.waveInProgress){
-                text.append(" [orange]· идёт бой[]");
+                text.append(" [orange]· бой[]");
             }
             if(p.waveTimeSec >= 0f){
                 text.append(" [lightgray]· след. через ").append(fmtTime(p.waveTimeSec)).append("[]");
@@ -1374,94 +1390,108 @@ public class CampaignThreatRadar extends Mod{
             text.append('\n');
         }
 
-        // Enemy counts
-        text.append("[white]Враги:[accent] ").append(p.count).append("[]");
+        // --- enemies on the map ----------------------------------------------
+        text.append("[white]👾[accent] ").append(p.count).append("[]");
         if(p.count > 0){
-            text.append(" [lightgray](🚜").append(p.groundCount).append(" 🛸").append(p.flyingCount).append(")[]");
+            text.append(" [lightgray]🚜").append(p.groundCount).append(" 🛸").append(p.flyingCount).append("[]");
             if(p.bossCount > 0){
                 text.append(" [scarlet]💀").append(p.bossCount).append("[]");
             }
-            if(p.totalEnemyHp > 0f){
-                text.append(" [lightgray]· ΣHP ~").append(fmtAmount(p.totalEnemyHp))
-                        .append(" · урон ~").append((int)p.totalEnemyDps).append("/с[]");
-            }
+            text.append(" [lightgray]ΣHP ~").append(fmtAmount(p.totalEnemyHp))
+                    .append(" · ").append((int)p.totalEnemyDps).append("/с");
             if(p.nearestTiles < Float.MAX_VALUE){
-                text.append(" [lightgray]· ближ. ").append((int)(p.nearestTiles + 0.5f)).append(" бл.[]");
-            }
-        }
-        text.append('\n');
-
-        // Threat and time to contact
-        if(p.threats > 0 && p.directEta < Float.MAX_VALUE){
-            text.append("[scarlet]⚠️ ПРОРЫВ: ").append(p.threats).append(" к ядру · ETA ")
-                    .append(etaSeconds(p.directEtaLow)).append("–").append(etaSeconds(p.directEtaHigh)).append("с[]\n");
-        }else if(p.closeThreats > 0){
-            text.append("[crimson]🚨 Враг рядом с ядром![]\n");
-        }else if(p.count > 0 && p.eta < Float.MAX_VALUE){
-            text.append("[orange]🟠 Враги в обход · ETA ")
-                    .append(etaSeconds(p.etaLow)).append("–").append(etaSeconds(p.etaHigh)).append("с[]\n");
-        }else if(p.count == 0){
-            text.append("[lightgray]Вражеских юнитов нет[]\n");
-        }
-
-        // Forecast: what is going to happen in the next minutes
-        if(p.incoming > 0){
-            text.append("[lightgray]🔮 За ").append((int)HORIZON_SECONDS).append(" с: ")
-                    .append(p.incoming).append(" врага у ядра · урон ~").append((int)p.incomingDps).append("/с[]\n");
-        }
-        if(p.coreDeath < Float.MAX_VALUE){
-            text.append("[crimson]💥 Ядро (").append((int)p.coreHealth).append(" HP) падёт через ~")
-                    .append((int)p.coreDeath).append("с[]\n");
-        }
-        if(p.defenseDps > 0f){
-            boolean holds = p.incomingDps <= 0f || p.defenseDps >= p.incomingDps;
-            text.append(holds ? "[green]🛡 Оборона ~" : "[orange]🛡 Оборона ~")
-                    .append((int)p.defenseDps).append("/с — ")
-                    .append(holds ? "шанс отбить высокий" : "может не удержать");
-            int defG = (int)(p.defenseGroundDps + p.defenseSharedDps);
-            int defA = (int)(p.defenseAirDps + p.defenseSharedDps);
-            if(defG > 0 || defA > 0){
-                text.append(" (🚜").append(defG).append(" 🛸").append(defA);
-                if(p.allyDps > 0f) text.append(" 🤖").append((int)p.allyDps);
-                text.append(')');
+                text.append(" · ближ. ").append((int)(p.nearestTiles + 0.5f)).append(" бл.");
             }
             text.append("[]\n");
         }
 
-        // Wave survival forecast: how many more waves this defence can take
+        if(p.bossCount > 0 && p.bossNames.size > 0){
+            text.append("[scarlet]💀 БОСС: ").append(p.bossNames.toString(", ")).append("[]\n");
+        }
+
+        // --- the attack that is coming right now ------------------------------
+        if(p.threats > 0 && p.directEta < Float.MAX_VALUE){
+            text.append("[scarlet]⚠️ ПРОРЫВ ").append(p.threats).append(" к ядру · ETA ")
+                    .append(etaSeconds(p.directEtaLow)).append("–").append(etaSeconds(p.directEtaHigh)).append("с[]\n");
+        }else if(p.closeThreats > 0){
+            text.append("[crimson]🚨 Враг у ядра[]\n");
+        }else if(p.count > 0 && p.eta < Float.MAX_VALUE){
+            text.append("[orange]🟠 Обход · ETA ")
+                    .append(etaSeconds(p.etaLow)).append("–").append(etaSeconds(p.etaHigh)).append("с[]\n");
+        }
+
+        // --- the fight in the next minute, in one line -----------------------
+        if(p.incoming > 0){
+            StringBuilder battle = new StringBuilder();
+            battle.append("⚔ ").append((int)HORIZON_SECONDS).append("с: ").append(p.incoming).append(' ')
+                    .append(foeWord(p.incoming)).append(" · ").append((int)p.incomingDps).append("/с");
+            if(p.defenseDps > 0f){
+                battle.append(" · оборона ").append((int)p.defenseDps).append("/с");
+            }else{
+                battle.append(" · обороны нет");
+            }
+            if(p.coreDeath < Float.MAX_VALUE){
+                text.append("[crimson]").append(battle).append(" → ядро за ~")
+                        .append((int)p.coreDeath).append("с[]\n");
+            }else if(p.defenseDps > 0f){
+                text.append("[green]").append(battle).append(" → отобьём[]\n");
+            }else{
+                text.append("[orange]").append(battle).append("[]\n");
+            }
+        }
+
+        // --- what to improve: the answer to "where do I build next?" ---------
+        if(p.weakPoints != null && p.weakPoints.size > 0){
+            text.append("[gold]🎯 УЛУЧШИТЬ:[]\n");
+            for(int i = 0; i < p.weakPoints.size; i++){
+                WeakPoint wp = p.weakPoints.get(i);
+                Advice advice = adviceFor(wp);
+                // The number is red when the spot is critical, the action word
+                // keeps the colour the map marker has.
+                text.append(wp.severity >= 0.65f ? "[crimson]" : "[lightgray]")
+                        .append(i + 1).append(")[] [").append(advice.color).append(']').append(advice.action)
+                        .append("[lightgray] · ").append(wp.direction).append(' ')
+                        .append(wp.tileX).append(',').append(wp.tileY)
+                        .append(" — ").append(advice.detail).append("[]\n");
+            }
+        }
+
+        // --- how long the base holds ----------------------------------------
         WaveForecast fc = p.forecast;
         if(fc != null && fc.available){
             if(fc.fallWave > 0){
                 String reasonText = switch(fc.reason){
-                    case "ground" -> " — пробьёт наземка";
-                    case "air" -> " — пробьёт авиация";
-                    case "boss" -> " — убьёт босс/гардиан";
-                    case "no-ground" -> " — нет урона по земле";
-                    case "no-air" -> " — нет ПВО";
-                    case "no-defense" -> " — обороны нет";
+                    case "ground" -> "пробьёт наземка";
+                    case "air" -> "пробьёт авиация";
+                    case "boss" -> "убьёт босс";
+                    case "no-ground" -> "нет урона по земле";
+                    case "no-air" -> "нет ПВО";
+                    case "no-defense" -> "обороны нет";
                     default -> "";
                 };
                 if(p.wave > 0 && fc.fallWave <= p.wave){
-                    text.append("[crimson]🏰 Прогноз: эта волна может стать последней").append(reasonText).append("[]\n");
+                    text.append("[crimson]🏰 эта волна может быть последней — ").append(reasonText).append("[]\n");
                 }else{
                     text.append(fc.wavesLeft <= 1 ? "[crimson]" : (fc.wavesLeft <= 4 ? "[orange]" : "[yellow]"))
-                            .append("🏰 Прогноз: ещё ~").append(fc.wavesLeft).append(' ').append(waveWord(fc.wavesLeft))
-                            .append(" · падёт на ~").append(fc.fallWave).append("-й").append(reasonText).append("[]\n");
+                            .append("🏰 ещё ~").append(fc.wavesLeft).append(' ').append(waveWord(fc.wavesLeft))
+                            .append(" · свалится на ~").append(fc.fallWave).append("-й — ")
+                            .append(reasonText).append("[]\n");
                 }
             }else if(fc.cappedByWin){
-                text.append("[green]🏰 Прогноз: дотянет до победы (волна ").append(p.winWave).append(") ✅[]\n");
+                text.append("[green]🏰 дотянет до победы (волна ").append(p.winWave).append(") ✅[]\n");
             }else if(fc.wavesLeft > 0){
-                text.append("[green]🏰 Прогноз: держится ещё ").append(fc.wavesLeft).append("+ ")
-                        .append(waveWord(fc.wavesLeft)).append("[]\n");
+                text.append("[green]🏰 держится ещё ").append(fc.wavesLeft).append("+ волн[]\n");
             }
         }
+
+        // --- the next wave, so it can be prepared for ------------------------
         if(p.nextWave != null){
             WaveLoad nw = p.nextWave;
-            text.append("[lightgray]🌊 Волна ").append(nw.wave).append(": ").append(nw.count)
-                    .append(" враг. (🚜").append(nw.groundCount).append(" 🛸").append(nw.flyingCount).append(')');
-            if(nw.bossCount > 0) text.append(" 💀").append(nw.bossCount);
-            text.append(" · ΣHP ~").append(fmtAmount(nw.totalHp))
-                    .append(" · урон ~").append((int)nw.totalDps).append("/с");
+            text.append("[lightgray]🌊 след. волна ").append(nw.wave).append(": ").append(nw.count)
+                    .append(' ').append(foeWord(nw.count))
+                    .append(" · ΣHP ~").append(fmtAmount(nw.totalHp))
+                    .append(" · ").append((int)nw.totalDps).append("/с");
+            if(nw.bossCount > 0) text.append(" · 💀").append(nw.bossCount);
             if(nw.composition != null && !nw.composition.isEmpty()){
                 text.append(" · ").append(nw.composition);
             }
@@ -1469,108 +1499,79 @@ public class CampaignThreatRadar extends Mod{
         }
         if(fc != null && fc.available && fc.nextBossWave > 0 && fc.nextBossIn > 0 && fc.nextBossIn <= 10
                 && p.bossCount == 0 && (p.nextWave == null || p.nextWave.wave != fc.nextBossWave)){
-            text.append("[scarlet]💀 Босс/гардиан на волне ").append(fc.nextBossWave)
+            text.append("[scarlet]💀 босс/гардиан на волне ").append(fc.nextBossWave)
                     .append(" (через ").append(fc.nextBossIn).append(' ').append(waveWord(fc.nextBossIn)).append(")[]\n");
         }
 
-        // Weak defence sectors: the same places are marked with ✚ on the whole-map radar.
-        if(p.weakPoints != null && p.weakPoints.size > 0){
-            int shownWeak = Math.min(2, p.weakPoints.size);
-            for(int i = 0; i < shownWeak; i++){
-                WeakPoint wp = p.weakPoints.get(i);
-                String reason = switch(wp.kind){
-                    case MARKER_AIR -> wp.airDps > 0f ? "слабое ПВО (~" + (int)wp.airDps + "/с)" : "нет ПВО";
-                    case MARKER_WALL -> "нужны стены (сейчас ~" + fmtAmount(wp.wallHp) + " HP)";
-                    case MARKER_SUPPLY -> "турель без патронов";
-                    case MARKER_REPAIR -> "оборона повреждена (" + (int)wp.healthPct + "% HP)";
-                    default -> "мало урона по земле (~" + (int)wp.groundDps + "/с)";
-                };
-                text.append(wp.severity >= 0.65f ? "[orange]" : "[yellow]")
-                        .append("🧭 Усилить ").append(wp.direction)
-                        .append(" (").append(wp.tileX).append(',').append(wp.tileY).append("): ")
-                        .append(reason).append("[]\n");
-            }
-            if(p.weakPoints.size > shownWeak){
-                text.append("[lightgray]🧭 Ещё меток усиления: ").append(p.weakPoints.size - shownWeak)
-                        .append(" — см. карту ✚[]\n");
-            }
-        }
-
-        // Bosses
-        if(p.bossCount > 0 && p.bossNames.size > 0){
-            text.append("[scarlet]💀 БОСС: ").append(p.bossNames.toString(", ")).append("[]\n");
-        }
-
-        // Core health
+        // --- problems that need a reaction right now -------------------------
         if(p.minCoreHp < 99f){
             int hp = (int)p.minCoreHp;
-            if(hp <= 35){
-                text.append("[crimson]🚨 КРИТИЧЕСКИЙ УРОН ЯДРУ: ").append(hp).append("%![]\n");
-            }else{
-                text.append("[coral]⚠️ ЯДРО ПОВРЕЖДЕНО: ").append(hp).append("%[]\n");
-            }
+            text.append(hp <= 35 ? "[crimson]🚨 Ядро: " : "[coral]⚠️ Ядро: ").append(hp).append("% HP[]\n");
         }
 
-        // Power
         if(p.blackout){
-            text.append("[scarlet]⚡ СЕТЬ ОБЕСТОЧЕНА: ").append((int)p.powerNet).append("/с[]\n");
+            text.append("[scarlet]⚡ Сеть обесточена (").append((int)p.powerNet).append("/с)[]\n");
         }else if(p.powerDeficit){
-            text.append("[coral]⚡ ДЕФИЦИТ ЭНЕРГИИ: ").append((int)p.powerNet).append("/с (АКБ: ")
-                    .append((int)p.battery).append("%)");
+            text.append("[coral]⚡ Дефицит ").append((int)p.powerNet).append("/с · АКБ ")
+                    .append((int)p.battery).append('%');
             if(p.batterySeconds < Float.MAX_VALUE){
-                text.append(" · АКБ на ~").append(fmtTime(p.batterySeconds));
+                text.append(" (~").append(fmtTime(p.batterySeconds)).append(')');
             }
             text.append("[]\n");
         }
 
-        // Turrets and damaged buildings
-        if(p.emptyTurrets > 0){
-            text.append("[yellow]📦 Турели без патронов: ").append(p.emptyTurrets).append(" шт.[]\n");
+        // The ammo and the damage counts are only repeated when the advice list
+        // does not already point at the exact building.
+        boolean adviceHasSupply = false, adviceHasRepair = false;
+        if(p.weakPoints != null){
+            for(WeakPoint wp : p.weakPoints){
+                if(wp.kind == MARKER_SUPPLY) adviceHasSupply = true;
+                if(wp.kind == MARKER_REPAIR) adviceHasRepair = true;
+            }
         }
-        if(p.damagedBuildings >= 3){
-            text.append("[yellow]🛠️ Повреждения базы: ").append(p.damagedBuildings).append(" построек[]\n");
+        StringBuilder trouble = new StringBuilder();
+        if(p.emptyTurrets > 0 && !adviceHasSupply){
+            trouble.append("📦 без патронов ").append(p.emptyTurrets);
+        }
+        if(p.damagedBuildings >= 3 && !adviceHasRepair){
+            if(trouble.length() > 0) trouble.append(" · ");
+            trouble.append("🛠️ повреждено ").append(p.damagedBuildings);
+        }
+        if(trouble.length() > 0){
+            text.append("[yellow]").append(trouble).append("[]\n");
         }
 
-        // Base statistics
+        // --- base at a glance ------------------------------------------------
         StringBuilder baseLine = new StringBuilder();
-        if(p.buildingCount > 0) baseLine.append("построек ").append(p.buildingCount);
-        if(p.turretCount > 0){
+        if(p.turretCount > 0) baseLine.append("турелей ").append(p.turretCount);
+        if(p.defenseDps > 0f){
             if(baseLine.length() > 0) baseLine.append(" · ");
-            baseLine.append("турелей ").append(p.turretCount);
+            baseLine.append("🛡").append((int)p.defenseDps).append("/с");
         }
         if(p.ownCount > 0){
             if(baseLine.length() > 0) baseLine.append(" · ");
-            baseLine.append("свои юниты ").append(p.ownCount)
-                    .append(" (🚜").append(p.ownGround).append(" 🛸").append(p.ownFlying).append(')');
+            baseLine.append("🤖").append(p.ownCount);
         }
         if(p.hasPower && !p.powerDeficit){
             if(baseLine.length() > 0) baseLine.append(" · ");
             baseLine.append("⚡").append(p.powerNet >= 0f ? "+" : "").append((int)p.powerNet).append("/с");
         }
+        if(p.coreItems >= 0){
+            if(baseLine.length() > 0) baseLine.append(" · ");
+            baseLine.append("📦").append(fmtAmount(p.coreItems));
+        }
         if(baseLine.length() > 0){
             text.append("[lightgray]🏭 ").append(baseLine).append("[]\n");
         }
 
-        // Session statistics (the game's own GameStats counters)
-        if(p.hasStats){
-            text.append("[gray]📈 Убито ").append(p.kills)
-                    .append(" · построено ").append(p.built)
-                    .append(" · потеряно ").append(p.destroyed)
-                    .append(" · юнитов созд. ").append(p.unitsCreated);
-            if(p.coreItems >= 0) text.append(" · 📦 в ядре ").append(fmtAmount(p.coreItems));
-            text.append("[]\n");
-        }else if(p.coreItems >= 0){
-            text.append("[gray]📦 Предметов в ядре: ").append(fmtAmount(p.coreItems)).append("[]\n");
-        }
-
-        // Everything is fine
+        // --- all quiet --------------------------------------------------------
         boolean hasAlerts = p.threats > 0 || p.closeThreats > 0 || p.bossCount > 0 || p.incoming > 0 ||
                 p.minCoreHp < 99f || p.powerDeficit ||
                 (p.forecast != null && p.forecast.fallWave > 0 && p.forecast.wavesLeft <= 1) ||
                 (p.weakPoints != null && p.weakPoints.size > 0) ||
                 p.emptyTurrets > 0 || p.damagedBuildings >= 3;
         if(!hasAlerts && p.count == 0){
-            text.append("[green]✅ Все системы стабильны[]");
+            text.append("[green]✅ Всё стабильно[]");
         }
 
         // Remove trailing newline if any
@@ -1579,6 +1580,80 @@ public class CampaignThreatRadar extends Mod{
         }
 
         return text.toString();
+    }
+
+    /** Russian plural of "враг": враг / врага / врагов. */
+    public static String foeWord(int n){
+        int mod10 = n % 10;
+        int mod100 = n % 100;
+        if(mod10 == 1 && mod100 != 11) return "враг";
+        if(mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return "врага";
+        return "врагов";
+    }
+
+    /** Markup colour of a weak-point kind; the same colour is used on the map. */
+    public static String markerColorName(int kind){
+        return switch(kind){
+            case MARKER_AIR -> "accent";
+            case MARKER_GROUND -> "orange";
+            case MARKER_WALL -> "lightgray";
+            case MARKER_SUPPLY -> "yellow";
+            case MARKER_REPAIR -> "coral";
+            default -> "white";
+        };
+    }
+
+    /** Colour of a weak-point kind on the tactical map. */
+    public static Color markerColor(int kind){
+        return switch(kind){
+            case MARKER_AIR -> new Color(0.40f, 0.70f, 1f, 1f);
+            case MARKER_GROUND -> new Color(1f, 0.60f, 0.15f, 1f);
+            case MARKER_WALL -> new Color(0.78f, 0.82f, 0.85f, 1f);
+            case MARKER_SUPPLY -> new Color(1f, 0.85f, 0.20f, 1f);
+            case MARKER_REPAIR -> new Color(1f, 0.45f, 0.40f, 1f);
+            default -> new Color(1f, 0.85f, 0.20f, 1f);
+        };
+    }
+
+    /**
+     * Turns a weak point into a concrete instruction: what to build, how much of
+     * it is missing and in which colour it is drawn on the map. This is the
+     * answer to the only question that really matters in a defence: what do I
+     * improve?
+     */
+    public static Advice adviceFor(WeakPoint wp){
+        Advice advice = new Advice();
+        if(wp == null) return advice;
+        switch(wp.kind){
+            case MARKER_AIR -> {
+                advice.action = "ПВО";
+                advice.color = markerColorName(MARKER_AIR);
+                advice.detail = wp.airDps > 0f
+                        ? "сейчас ~" + (int)wp.airDps + "/с, нужно +" + (int)wp.needAir + "/с"
+                        : "нет турелей по воздуху";
+            }
+            case MARKER_WALL -> {
+                advice.action = "СТЕНЫ";
+                advice.color = markerColorName(MARKER_WALL);
+                advice.detail = "сейчас " + fmtAmount(wp.wallHp) + " HP, нужно +" + fmtAmount(wp.needWall) + " HP";
+            }
+            case MARKER_SUPPLY -> {
+                advice.action = "ПАТРОНЫ";
+                advice.color = markerColorName(MARKER_SUPPLY);
+                advice.detail = "турель без патронов";
+            }
+            case MARKER_REPAIR -> {
+                advice.action = "РЕМОНТ";
+                advice.color = markerColorName(MARKER_REPAIR);
+                advice.detail = "постройка на " + (int)wp.healthPct + "% HP";
+            }
+            default -> {
+                advice.action = "ТУРЕЛЬ";
+                advice.color = markerColorName(MARKER_GROUND);
+                advice.detail = "по земле ~" + (int)wp.groundDps + "/с, нужно +" + (int)wp.needGround + "/с";
+            }
+        }
+        return advice;
     }
 
     /** Converts ticks into whole seconds, never below one. */

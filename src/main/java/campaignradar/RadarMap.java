@@ -45,8 +45,7 @@ public class RadarMap extends Element{
     private static final Color colorCore = new Color(0.35f, 0.65f, 1f, 1f);
     private static final Color colorWeakest = new Color(1f, 0.85f, 0.25f, 1f);
     private static final Color colorCriticalCore = new Color(1f, 0.25f, 0.2f, 1f);
-    private static final Color colorMarker = new Color(1f, 0.85f, 0.2f, 1f);
-    private static final Color colorMarkerSevere = new Color(1f, 0.45f, 0.15f, 1f);
+    private static final Color colorCritical = new Color(1f, 0.25f, 0.2f, 0.9f);
     private static final Color colorSpawn = new Color(1f, 0.25f, 0.25f, 0.85f);
 
     public RadarMap(){
@@ -126,10 +125,16 @@ public class RadarMap extends Element{
         }
 
         // Places where the defence should be improved (also listed in the text).
+        // The colour says what to build there, the red ring marks a critical spot.
         for(CampaignThreatRadar.WeakPoint marker : weakPoints){
             float px = projectX(marker.x, mapX, scale);
             float py = projectY(marker.y, mapY, scale);
-            Draw.color(marker.severity >= 0.65f ? colorMarkerSevere : colorMarker);
+            if(marker.severity >= 0.65f){
+                Draw.color(colorCritical);
+                Lines.stroke(1.2f);
+                Lines.circle(px, py, 10f);
+            }
+            Draw.color(CampaignThreatRadar.markerColor(marker.kind));
             Lines.stroke(1.6f);
             Lines.circle(px, py, 7f);
             Lines.line(px - 4f, py, px + 4f, py);

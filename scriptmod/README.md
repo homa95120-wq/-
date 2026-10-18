@@ -8,9 +8,9 @@ no Gradle) and dropped into the `mods` folder as-is.
 | File | Purpose |
 |---|---|
 | `mod.hjson` | Meta for the script mod. Internal name `campaign-threat-radar-zip`, `hidden: true`, **no** `main` and **no** `java: true` - with either of those the loader would treat the archive as a Java mod and fail to find the class. |
-| `scripts/main.js` | The mod. Pure logic + diagnostic radar algorithm + whole-map tactical view with weak-defence markers (`extend(Packages.arc.scene.Element, ...)`) + HUD registration at top-right (left of the minimap). |
+| `scripts/main.js` | The mod. Pure logic + diagnostic radar algorithm + whole-map tactical view with weak-defence markers (`extend(Packages.arc.scene.Element, ...)`) + a prioritized "what to improve next" list + HUD registration at top-right (left of the minimap). |
 | `build.py` | Builds `../dist/CampaignThreatRadar.zip` (exactly `mod.hjson` + `scripts/main.js` in the archive root, reproducible bytes). |
-| `test-logic.js` | 44 offline checks of the pure logic (`node scriptmod/test-logic.js`). |
+| `test-logic.js` | 48 offline checks of the pure logic (`node scriptmod/test-logic.js`). |
 | `test-hud.js` | Mock harness for the HUD glue: fires `ClientLoadEvent` against fake game globals (`node scriptmod/test-hud.js`). Catches typos in the glue, not Rhino-specific behaviour. |
 
 Build and test:
@@ -40,6 +40,8 @@ Verified against the game sources (v160.7), not guessed:
   markers come from `Vars.spawner.getSpawns()` (`Seq<Tile>`,
   `Tile.worldx()/worldy()`). Weak-sector coverage uses `TurretBuild.range()`
   plus the block's `targetGround`/`targetAir` flags, so a turret only counts
-  where it can actually shoot.
+  where it can actually shoot. Every marker also carries the *missing*
+  amount (`needGround`, `needAir`, `needWall`), which is what the panel
+  prints as "нужно +N/с" / "нужно +N HP".
 - `extend()`/JavaAdapter does not work on iOS, so the script build is not
   marked as iOS compatible.

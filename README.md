@@ -33,15 +33,18 @@ Mindustry Java mod template (GitHub-release `dependencies.jar`, Java 17).
 
 ## Скачать / Download
 
-Готовый jar лежит в разделе **[Releases](../../releases/latest)** — файл `CampaignThreatRadar.jar`
-скачивается одним кликом и без входа в GitHub. В описании релиза указаны размер и SHA-256;
-сверьте их со скачанным файлом:
+Последний релиз: **[v1.1 — CampaignThreatRadar.jar](../../releases/latest)** (4205 байт,
+SHA-256 `2b9d7e77f3d4cd1950093489353f402b9e60d17ae9df199a626e0015c8c6d000`).
+Файл скачивается одним кликом и без входа в GitHub. В описании каждого релиза указаны
+его собственные размер и SHA-256 — сверьте их со скачанным файлом:
 
 - Windows: `certutil -hashfile CampaignThreatRadar.jar SHA256`
 - Linux/macOS: `sha256sum CampaignThreatRadar.jar`
 
 Если хэш или размер не совпали, скачался не jar (так бывает, когда браузер сохраняет страницу
-входа или ошибки под именем `.jar`). Скачайте файл из Releases заново.
+входа или ошибки под именем `.jar`). Признак настоящего jar — первые два байта `PK`
+(PowerShell: `Format-Hex CampaignThreatRadar.jar | Select-Object -First 1`).
+Скачайте файл из Releases заново.
 
 ## Сборка / Building
 
@@ -71,13 +74,26 @@ If a release with that tag already exists, its jar is replaced.
 
 ## Установка / Installing
 
-- **Windows:** скопируйте `CampaignThreatRadar.jar` в `%APPDATA%\Mindustry\mods\`
-- **Linux:** `~/.local/share/Mindustry/mods/`
-- **macOS:** `~/Library/Application Support/Mindustry/mods/`
+Три способа, любой из них даёт один и тот же файл:
 
-Или в игре: **Mods → Import file…** и выбрать jar. После перезапуска включите мод в списке.
+1. **Из игры, самый простой.** **Mods → Import → Import from GitHub**, ввести
+   `homa95120-wq/-` (имя репозитория — это буквально дефис). Игра сама возьмёт
+   `CampaignThreatRadar.jar` из последнего релиза, перезапустится и включит мод.
+2. **Скачать из Releases** и в игре нажать **Mods → Import file…**, выбрать jar.
+3. **Скопировать вручную** в папку модов и перезапустить игру:
+   - **Windows:** `%APPDATA%\Mindustry\mods\`
+   - **Linux:** `~/.local/share/Mindustry/mods/`
+   - **macOS:** `~/Library/Application Support/Mindustry/mods/`
+
+После перезапуска мод должен быть включён в списке (стрелка/галочка слева от названия).
+Если ставили вручную — включите его сами и перезапустите игру ещё раз.
 
 ### Мод не появился в списке? / Mod not in the list?
+
+Сначала проверьте сам файл — это самая частая причина. В `mods` должен лежать ровно
+4205 байт с хэшем из раздела «Скачать». Если размер другой (особенно 0, несколько КБ
+или десятки КБ) — в папку попал не jar: недокачанная загрузка, HTML-страница GitHub
+или ZIP репозитория. Удалите файл и поставьте мод способом 1 или 2 из раздела «Установка».
 
 Mindustry молча пропускает jar, из которого не смогла прочитать метаданные. В логе
 (Windows `%APPDATA%\Mindustry\logs\latest.log`, Linux `~/.local/share/Mindustry/logs/`,
@@ -85,10 +101,18 @@ macOS `~/Library/Application Support/Mindustry/logs/`) ищите строки:
 
 - `doesn't have a '[mod/plugin].[h]json' file, skipping` — в корне архива нет `mod.hjson`
   (файл битый, это не jar, или внутри лишняя папка-обёртка);
-- `Failed to load mod file ... Skipping` — мод упал при загрузке, ниже будет стектрейс.
+- `Failed to load mod file ... Skipping` — мод упал при загрузке, ниже будет стектрейс;
+- строк с названием мода вообще нет — файл не попал в папку модов (игра не перезапущена,
+  или jar положен в папку установки игры вместо папки данных — пути выше).
 
-Ещё две частые причины: игра не была перезапущена после копирования файла, и jar положен
-в папку установки игры вместо папки данных (пути выше).
+Быстрая проверка лога в Windows PowerShell:
+
+```powershell
+Select-String -Path "$env:APPDATA\Mindustry\logs\latest.log" -Pattern 'mod','CampaignThreatRadar'
+```
+
+Если в списке мод есть, но панели в кампании нет — проверьте, что мод включён и игра
+перезапущена: обработчик HUD вешается при старте клиента, на лету он не появляется.
 
 Затем запустите кампанию — в левом верхнем углу появится панель **CAMPAIGN RADAR**:
 количество вражеских юнитов, сколько из них движутся к ядрам и за сколько секунд

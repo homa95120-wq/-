@@ -142,7 +142,7 @@ const sandbox = {
                 })
             }
         },
-        player: { isAdded: () => true, team: () => "player", unit: { x: 90, y: 10 } },
+        player: { isAdded: () => true, team: () => "player", unit: () => ({ x: 90, y: 10 }) },
         ui: {
             hudGroup: {
                 fill(consFn) {

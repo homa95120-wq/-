@@ -551,7 +551,8 @@ if (typeof Vars !== "undefined" && typeof Events !== "undefined" && typeof Clien
 
         var playerUnit = null;
         try {
-            playerUnit = Vars.player ? Vars.player.unit : null;
+            // Player.unit is a protected field, the accessor is unit().
+            playerUnit = callSafely(Vars.player, "unit", null);
         } catch (ignored) {}
 
         var centerX = 0, centerY = 0;

@@ -213,9 +213,9 @@ public class CampaignThreatRadar extends Mod{
             }
             centerX = weakest.x;
             centerY = weakest.y;
-        }else if(Vars.player != null && Vars.player.unit != null){
-            centerX = Vars.player.unit.x;
-            centerY = Vars.player.unit.y;
+        }else if(Vars.player != null && Vars.player.unit() != null){
+            centerX = Vars.player.unit().x;
+            centerY = Vars.player.unit().y;
         }
         radar.centerX = centerX;
         radar.centerY = centerY;
@@ -228,9 +228,9 @@ public class CampaignThreatRadar extends Mod{
             radar.blips.add(blip);
         }
 
-        if(Vars.player != null && Vars.player.unit != null){
-            radar.playerX = Vars.player.unit.x;
-            radar.playerY = Vars.player.unit.y;
+        if(Vars.player != null && Vars.player.unit() != null){
+            radar.playerX = Vars.player.unit().x;
+            radar.playerY = Vars.player.unit().y;
             radar.hasPlayer = true;
         }else{
             radar.hasPlayer = false;

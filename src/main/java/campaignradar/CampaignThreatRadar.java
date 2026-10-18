@@ -38,9 +38,12 @@ import mindustry.world.meta.BlockGroup;
  * <ul>
  *     <li>a compact text panel with enemy counts, threat ETAs, key diagnostics and forecasts,</li>
  *     <li>a responsive whole-map view with every core, spawn, enemy and weak defence sector,</li>
- *     <li>a clickable, terrain-checked defense blueprint that remains a recommendation only.</li>
+ *     <li>a clickable, terrain-checked defense blueprint that remains a recommendation only,</li>
+ *     <li>an optional, off-by-default {@link Autopilot} for one local Serpulo campaign sector.</li>
  * </ul>
- * Does not create entities, modify rules, or send packets (hidden: true).
+ * The radar itself does not create entities, modify rules, or send packets (hidden: true).
+ * The autopilot acts only after an explicit start, only in a local single-player
+ * Serpulo campaign on Normal, and only through the player's own unit and controls.
  */
 public class CampaignThreatRadar extends Mod{
     /** Refresh rate in in-game ticks (~30 ticks = 0.5 s at 60 fps). */
@@ -116,13 +119,20 @@ public class CampaignThreatRadar extends Mod{
     public static final int PLAN_MENDER = 3;
 
     private Label status;
+    private Label autopilotStatus;
     private RadarMap radar;
+    private Autopilot autopilot;
+    /** Latest analysis pass; the autopilot reads weak points and the wave forecast from it. */
+    private Prediction lastPrediction;
     private float nextRefresh;
     private int selectedTileX = -1, selectedTileY = -1;
 
     public CampaignThreatRadar(){
         // Client-only mod: never register UI hooks on a headless server.
         if(Vars.headless) return;
+
+        // Off by default; it only acts after the player presses "start".
+        autopilot = new Autopilot(this);
 
         Events.on(ClientLoadEvent.class, event -> {
             // hudGroup is only visible while a game is running.
@@ -153,6 +163,25 @@ public class CampaignThreatRadar extends Mod{
 
                     status = panel.add("Сканирование...").color(Color.white).left().width(contentWidth).get();
                     status.setWrap(true);
+                    panel.row();
+                    autopilotStatus = panel.add(autopilot.statusText()).left().width(contentWidth).get();
+                    autopilotStatus.setWrap(true);
+                    panel.row();
+                    panel.table(buttons -> {
+                        buttons.defaults().height(30f).growX().pad(1f);
+                        buttons.button("▶ Автопилот", Styles.flatt, () -> {
+                            autopilot.start();
+                            refresh();
+                        });
+                        buttons.button("⏸ Пауза", Styles.flatt, () -> {
+                            autopilot.pause();
+                            refresh();
+                        });
+                        buttons.button("■ Стоп", Styles.flatt, () -> {
+                            autopilot.stop();
+                            refresh();
+                        });
+                    }).width(contentWidth).left();
                     panel.row();
                     radar = new RadarMap();
                     radar.selectionListener = (tileX, tileY) -> {
@@ -185,13 +214,20 @@ public class CampaignThreatRadar extends Mod{
     /** Legend shown under the tactical mini map. */
     public static String legend(){
         return "[lightgray]◆[accent] ядро  [lightgray]✚[yellow] усилить  [lightgray]□[scarlet] спавн  [lightgray]●[scarlet] враг  [lightgray]●[orange] авиация  [lightgray]◉[scarlet] босс[]\n" +
-                "[lightgray]Клик по карте — выбрать участок · план не строит автоматически[]";
+                "[lightgray]Клик по карте — выбрать участок · строит только включённый автопилот[]";
+    }
+
+    /** Latest analysis pass, or null outside a game. */
+    Prediction latestPrediction(){
+        return lastPrediction;
     }
 
     private void refresh(){
         if(status == null) return;
+        if(autopilotStatus != null && autopilot != null) autopilotStatus.setText(autopilot.statusText());
         if(Vars.state == null || !Vars.state.isGame() || Vars.player == null || !Vars.player.isAdded()){
             status.setText(format(false, null));
+            lastPrediction = null;
             selectedTileX = -1;
             selectedTileY = -1;
             if(radar != null) radar.clear();
@@ -339,6 +375,7 @@ public class CampaignThreatRadar extends Mod{
         }
 
         Prediction prediction = compute(units, cores, base, buildWaveInfo(enemy), HORIZON_SECONDS);
+        lastPrediction = prediction;
 
         DefensePlan defensePlan = selectedTileX >= 0 && selectedTileY >= 0
                 ? buildDefensePlan(selectedTileX, selectedTileY, prediction) : null;
@@ -354,7 +391,7 @@ public class CampaignThreatRadar extends Mod{
     private static final int SITE_OUTSIDE = 3;
 
     /** Creates a compact blueprint oriented toward the nearest real approach. */
-    private DefensePlan buildDefensePlan(int tileX, int tileY, Prediction prediction){
+    DefensePlan buildDefensePlan(int tileX, int tileY, Prediction prediction){
         DefensePlan plan = new DefensePlan();
         plan.centerTileX = tileX;
         plan.centerTileY = tileY;

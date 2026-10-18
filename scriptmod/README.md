@@ -5,15 +5,17 @@ that Mindustry v8 exposes to script mods. It exists for one reason: the
 finished product is a plain `.zip` that can be built anywhere (no JDK,
 no Gradle) and dropped into the `mods` folder as-is. The whole-map HUD is
 clickable: it previews a terrain-checked compact defence plan without placing
-blocks or changing the world.
+blocks or changing the world. Since 1.8 it also contains the stage-1 autopilot
+(off by default, ▶ / ⏸ / ■ under the radar text): a mirror of the Java
+`Autopilot` + `AutopilotLogic`, allowed only in a local Normal Serpulo campaign.
 
 | File | Purpose |
 |---|---|
 | `mod.hjson` | Meta for the script mod. Internal name `campaign-threat-radar-zip`, `hidden: true`, **no** `main` and **no** `java: true` - with either of those the loader would treat the archive as a Java mod and fail to find the class. |
-| `scripts/main.js` | The mod. Pure logic + diagnostic radar algorithm + larger whole-map tactical view with weak-defence markers and a click-selected defence blueprint (`extend(Packages.arc.scene.Element, ...)`) + a concise, prioritized action list + responsive HUD registration left of the minimap. The plan follows the nearest spawn, checks water/occupied/border tiles and never places buildings. |
+| `scripts/main.js` | The mod. Pure logic + diagnostic radar algorithm + larger whole-map tactical view with weak-defence markers and a click-selected defence blueprint (`extend(Packages.arc.scene.Element, ...)`) + a concise, prioritized action list + responsive HUD registration left of the minimap. The plan follows the nearest spawn, checks water/occupied/border tiles and never places buildings by itself; the `autopilot*` pure functions and the autopilot glue (guard, one decision per second, drills + conveyor routing, defence, rearm, wave calls, watchdog) only act after ▶. |
 | `build.py` | Builds `../dist/CampaignThreatRadar.zip` (exactly `mod.hjson` + `scripts/main.js` in the archive root, reproducible bytes). |
-| `test-logic.js` | 52 offline checks of the pure logic (`node scriptmod/test-logic.js`), including plan geometry, terrain adjustment and map click projection. |
-| `test-hud.js` | 10-check mock harness for the HUD glue: fires `ClientLoadEvent` against fake game globals, simulates a map click and verifies the terrain-aware plan. Catches typos in the glue, not Rhino-specific behaviour. |
+| `test-logic.js` | 62 offline checks of the pure logic (`node scriptmod/test-logic.js`), including plan geometry, terrain adjustment, map click projection and the autopilot rules (guard, state machine, priorities, wave calls, watchdog, drill/conveyor routing). |
+| `test-hud.js` | 22-check mock harness for the HUD glue: fires `ClientLoadEvent` against fake game globals, simulates a map click, and drives the autopilot in a synthetic sector (drill + conveyor, Duo defence, wave call, stall → NEEDS HELP, pause/stop, network guard, world load, capture). Catches typos in the glue, not Rhino-specific behaviour. |
 
 Build and test:
 

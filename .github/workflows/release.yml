@@ -31,6 +31,13 @@ jobs:
           distribution: 'temurin'
           java-version: 17
 
+      - name: Autopilot logic checks (pure Java, no game needed)
+        run: |
+          javac -d build/autopilot-check \
+            src/main/java/campaignradar/AutopilotLogic.java \
+            src/test/java/campaignradar/AutopilotLogicCheck.java
+          java -cp build/autopilot-check campaignradar.AutopilotLogicCheck
+
       - name: Build mod jar
         run: |
           chmod +x ./gradlew

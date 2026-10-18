@@ -8,13 +8,19 @@
 "use strict";
 
 const assert = require("node:assert/strict");
-const { REFRESH_INTERVAL, MIN_SPEED, TOWARDS_CORE_DOT, CLOSE_DISTANCE, computeRadar, formatRadarText, etaSeconds } =
-    require("./scripts/main.js");
+const {
+    REFRESH_INTERVAL, MIN_SPEED, TOWARDS_CORE_DOT, CLOSE_DISTANCE, TILE_SIZE,
+    MINIMAP_WIDTH, MINIMAP_GAP, RADAR_RANGE_TILES, HORIZON_SECONDS,
+    predictArrival, computeRadar, formatRadarText, etaSeconds, legend
+} = require("./scripts/main.js");
 
 const CORE = { x: 100, y: 0, health: 1000, maxHealth: 1000 };
 function unit(overrides) {
     return Object.assign(
-        { x: 0, y: 0, vx: 1, vy: 0, speed: 1, dead: false, added: true, enemy: true, flying: false, boss: false, name: "Flare" },
+        {
+            x: 0, y: 0, vx: 1, vy: 0, speed: 1, maxSpeed: 1, accel: 0.5, dps: 10,
+            dead: false, added: true, enemy: true, flying: false, boss: false, name: "Flare"
+        },
         overrides
     );
 }
@@ -28,44 +34,58 @@ function check(name, fn) {
 
 check("no enemy units: count 0, no threat, all stable", () => {
     const r = computeRadar({ units: [], cores: [CORE] });
-    assert.deepEqual(r, {
-        count: 0,
-        groundCount: 0,
-        flyingCount: 0,
-        bossCount: 0,
-        bossNames: [],
-        threats: 0,
-        closeThreats: 0,
-        closestEtaTicks: null,
-        closestDistTiles: null,
-        minCoreHpPercent: 100,
-        powerStatus: null,
-        emptyTurrets: 0,
-        damagedBuildings: 0
-    });
+    assert.equal(r.count, 0);
+    assert.equal(r.threats, 0);
+    assert.equal(r.incoming, 0);
+    assert.equal(r.eta, Infinity);
+    assert.equal(r.minCoreHp, 100);
+    assert.equal(r.emptyTurrets, 0);
+    assert.equal(r.damagedBuildings, 0);
     assert.match(formatRadarText(true, r), /Все системы стабильны/);
 });
 
-check("stationary enemy is counted but is not an ETA threat", () => {
+check("stationary enemy is counted but is not a direct threat", () => {
     const r = computeRadar({ units: [unit({ vx: 0, vy: 0, speed: 0 })], cores: [CORE] });
     assert.equal(r.count, 1);
     assert.equal(r.threats, 0);
-    assert.equal(r.closestEtaTicks, null);
     assert.ok(MIN_SPEED === 0.05);
+    // A stopped unit still gets a forecast, it just needs more time.
+    assert.ok(isFinite(r.eta));
+    assert.ok(r.eta > 0);
 });
 
-check("enemy moving directly away from the core is not a threat", () => {
+check("enemy moving directly away from the core is not a direct threat", () => {
     const r = computeRadar({ units: [unit({ vx: -1 })], cores: [CORE] });
     assert.equal(r.count, 1);
     assert.equal(r.threats, 0);
 });
 
-check("enemy moving straight at the core: threat with ETA = dist / speed", () => {
-    // 600 units away, speed 2/tick -> 300 ticks -> 5 s.
-    const r = computeRadar({ units: [unit({ x: -500, vx: 2, speed: 2 })], cores: [CORE] });
+check("enemy moving straight at the core: threat with a realistic ETA range", () => {
+    // 600 units away (core is at x = 100), max speed 1 -> travel time plus detour factor.
+    const r = computeRadar({ units: [unit({ x: -500, vx: 1, speed: 1 })], cores: [CORE] });
     assert.equal(r.threats, 1);
-    assert.equal(r.closestEtaTicks, 300);
-    assert.match(formatRadarText(true, r), /ПРОРЫВ: 1 к ядру! ETA: ~5с/);
+    assert.ok(isFinite(r.directEta));
+    assert.ok(r.directEtaLow <= r.directEta && r.directEta <= r.directEtaHigh);
+    // 600 * 1.3 detour / (1 * 0.82 cruise) = 951 ticks = ~15 s
+    assert.ok(r.directEta > 900 && r.directEta < 1000, "eta was " + r.directEta);
+    assert.match(formatRadarText(true, r), /ПРОРЫВ: 1 к ядру · ETA \d+–\d+с/);
+});
+
+check("ETA uses the real speed of the unit type, not its current velocity", () => {
+    // A unit that just spawned is barely moving, but it will reach full speed soon.
+    const slow = computeRadar({ units: [unit({ x: -500, vx: 0, speed: 0 })], cores: [CORE] });
+    const fast = computeRadar({ units: [unit({ x: -500, vx: 1, speed: 1 })], cores: [CORE] });
+    // The stopped unit needs more time (it has to finish what it is doing),
+    // but it must not be off by orders of magnitude either.
+    assert.ok(slow.eta > fast.eta, "stopped unit should be later: " + slow.eta + " vs " + fast.eta);
+    assert.ok(slow.eta < fast.eta * 3, "stopped unit estimate is too pessimistic: " + slow.eta);
+});
+
+check("a detouring unit is predicted later than a direct one", () => {
+    const direct = computeRadar({ units: [unit({ x: -500, vx: 1, speed: 1 })], cores: [CORE] });
+    const detour = computeRadar({ units: [unit({ x: -500, vx: -1, speed: 1 })], cores: [CORE] });
+    assert.ok(detour.eta > direct.eta);
+    assert.match(formatRadarText(true, detour), /Враги в обход · ETA/);
 });
 
 check("heading threshold: cosine > 0.25 counts, below does not", () => {
@@ -79,27 +99,32 @@ check("heading threshold: cosine > 0.25 counts, below does not", () => {
 });
 
 check("the nearest core is used, not just any core", () => {
-    const r = computeRadar({ units: [unit({ vx: -1 })], cores: [CORE, { x: -10, y: 0, health: 100, maxHealth: 100 }] });
+    const r = computeRadar({
+        units: [unit({ vx: -1 })],
+        cores: [CORE, { x: -10, y: 0, health: 100, maxHealth: 100 }]
+    });
     assert.equal(r.threats, 1);
-    assert.equal(r.closestEtaTicks, 10);
+    assert.ok(r.directEta < 100, "eta to the close core should be tiny: " + r.directEta);
 });
 
 check("with several threats the smallest ETA wins", () => {
-    const slow = unit({ x: -500, vx: 1, speed: 1 }); // ETA 600
-    const fast = unit({ x: -200, vx: 2, speed: 2 }); // ETA 150
+    const slow = unit({ x: -500, vx: 1, speed: 1, maxSpeed: 1 });
+    const fast = unit({ x: -200, vx: 2, speed: 2, maxSpeed: 2 });
     const r = computeRadar({ units: [slow, fast], cores: [CORE] });
+    const slowOnly = computeRadar({ units: [slow], cores: [CORE] });
+    const fastOnly = computeRadar({ units: [fast], cores: [CORE] });
     assert.equal(r.count, 2);
     assert.equal(r.threats, 2);
-    assert.equal(r.closestEtaTicks, 150);
+    assert.ok(Math.abs(r.directEta - fastOnly.directEta) < 0.001);
+    assert.ok(r.directEta < slowOnly.directEta);
 });
 
-check("dead, removed and friendly units are filtered out", () => {
-    const r = computeRadar({
-        units: [unit({ dead: true }), unit({ added: false }), unit({ enemy: false }), unit({})],
-        cores: [CORE]
-    });
+check("units without a core are counted but not predicted", () => {
+    const r = computeRadar({ units: [unit()], cores: [] });
     assert.equal(r.count, 1);
-    assert.equal(r.threats, 1);
+    assert.equal(r.threats, 0);
+    assert.equal(r.eta, Infinity);
+    assert.equal(r.blips.length, 1);
 });
 
 check("counts breakdown: ground, flying, boss counts and names", () => {
@@ -127,7 +152,7 @@ check("core damage warning triggered when core HP < 99%", () => {
         units: [],
         cores: [{ x: 0, y: 0, health: 300, maxHealth: 1000 }] // 30% HP
     });
-    assert.equal(r.minCoreHpPercent, 30);
+    assert.equal(r.minCoreHp, 30);
     const text = formatRadarText(true, r);
     assert.match(text, /КРИТИЧЕСКИЙ УРОН ЯДРУ: 30%!/);
 });
@@ -137,19 +162,19 @@ check("power deficit and blackout diagnostics", () => {
     const r1 = computeRadar({
         units: [],
         cores: [CORE],
-        power: { netBalance: -150, batteryStored: 500, batteryCapacity: 1000 }
+        power: { net: -150, batteryPercent: 50 }
     });
-    assert.ok(r1.powerStatus.isDeficit);
-    assert.ok(!r1.powerStatus.isBlackout);
+    assert.ok(r1.powerDeficit);
+    assert.ok(!r1.blackout);
     assert.match(formatRadarText(true, r1), /ДЕФИЦИТ ЭНЕРГИИ: -150\/с \(АКБ: 50%\)/);
 
     // Complete blackout
     const r2 = computeRadar({
         units: [],
         cores: [CORE],
-        power: { netBalance: -50, batteryStored: 0, batteryCapacity: 1000 }
+        power: { net: -50, batteryPercent: 0 }
     });
-    assert.ok(r2.powerStatus.isBlackout);
+    assert.ok(r2.blackout);
     assert.match(formatRadarText(true, r2), /СЕТЬ ОБЕСТОЧЕНА: -50\/с/);
 });
 
@@ -157,18 +182,80 @@ check("empty turrets and damaged buildings diagnostics", () => {
     const r = computeRadar({
         units: [],
         cores: [CORE],
-        turrets: [{ hasAmmo: false, totalAmmo: 0 }, { hasAmmo: true, totalAmmo: 10 }, { hasAmmo: false, totalAmmo: 0 }],
-        buildings: [
-            { health: 20, maxHealth: 100 },
-            { health: 10, maxHealth: 100 },
-            { health: 40, maxHealth: 100 }
-        ]
+        emptyTurrets: 2,
+        damagedBuildings: 3
     });
     assert.equal(r.emptyTurrets, 2);
     assert.equal(r.damagedBuildings, 3);
     const text = formatRadarText(true, r);
     assert.match(text, /Турели без патронов: 2 шт\./);
     assert.match(text, /Повреждения базы: 3 построек/);
+});
+
+check("forecast: incoming units, their damage and the life of the core", () => {
+    const r = computeRadar({
+        units: [
+            unit({ x: -500, vx: 1, speed: 1, dps: 20 }),
+            unit({ x: -800, vx: 1, speed: 1, dps: 30 })
+        ],
+        cores: [CORE],
+        defenseDps: 0,
+        horizonSeconds: 60
+    });
+    assert.equal(r.incoming, 2);
+    assert.equal(r.incomingDps, 50);
+    // 1000 HP / 50 DPS = 20 s until the core falls
+    assert.ok(Math.abs(r.coreDeath - 20) < 0.001, "coreDeath was " + r.coreDeath);
+    const text = formatRadarText(true, r);
+    assert.match(text, /🔮 За 60 с: 2 врага у ядра · урон ~50\/с/);
+    assert.match(text, /💥 Ядро \(1000 HP\) падёт через ~20с/);
+});
+
+check("forecast: a strong defence keeps the core alive", () => {
+    const r = computeRadar({
+        units: [unit({ x: -500, vx: 1, speed: 1, dps: 20 })],
+        cores: [CORE],
+        defenseDps: 100,
+        horizonSeconds: 60
+    });
+    assert.equal(r.incomingDps, 20);
+    // The turrets deal more damage than the attackers, so the core survives.
+    assert.equal(r.coreDeath, Infinity);
+    const text = formatRadarText(true, r);
+    assert.match(text, /🛡 Оборона ~100\/с — шанс отбить высокий/);
+    assert.doesNotMatch(text, /падёт через/);
+});
+
+check("forecast: a weak defence is reported as such", () => {
+    const r = computeRadar({
+        units: [unit({ x: -500, vx: 1, speed: 1, dps: 200 })],
+        cores: [CORE],
+        defenseDps: 40
+    });
+    assert.match(formatRadarText(true, r), /🛡 Оборона ~40\/с — может не удержать/);
+    // 1000 HP / (200 - 40) DPS = ~6 s
+    assert.ok(Math.abs(r.coreDeath - 1000 / 160) < 0.001, "coreDeath was " + r.coreDeath);
+});
+
+check("the mini map gets one blip per enemy unit", () => {
+    const r = computeRadar({
+        units: [
+            unit({ flying: true, name: "Flare" }),
+            unit({ boss: true, name: "Reign" }),
+            unit({ name: "Dagger" })
+        ],
+        cores: [CORE]
+    });
+    assert.equal(r.blips.length, 3);
+    assert.deepEqual(r.blips.map((b) => b.kind), [1, 2, 0]);
+    assert.ok(r.blips.every((b) => isFinite(b.eta)));
+});
+
+check("units are still shown on the mini map without a core", () => {
+    const r = computeRadar({ units: [unit()], cores: [] });
+    assert.equal(r.blips.length, 1);
+    assert.equal(r.eta, Infinity);
+    assert.equal(r.incoming, 0);
 });
 
 check("outside a game the panel text is the inactive message", () => {
@@ -187,6 +274,19 @@ check("bad input does not throw", () => {
     assert.doesNotThrow(() => computeRadar(null));
     assert.doesNotThrow(() => computeRadar({}));
     assert.doesNotThrow(() => computeRadar({ units: [null, {}] }));
+    assert.doesNotThrow(() => predictArrival({}, 100, true));
+    assert.doesNotThrow(() => formatRadarText(true, null));
+});
+
+check("layout constants keep the panel left of the vanilla minimap", () => {
+    assert.ok(MINIMAP_WIDTH >= 150);
+    assert.ok(MINIMAP_GAP >= 40, "the panel has to keep a clear gap");
+    assert.ok(TILE_SIZE === 8);
+    assert.ok(RADAR_RANGE_TILES > 0);
+    assert.ok(HORIZON_SECONDS === 60);
+    assert.ok(REFRESH_INTERVAL === 30);
+    assert.ok(CLOSE_DISTANCE === 320);
+    assert.match(legend(), /ядро/);
 });
 
 console.log("\n" + passed + "/" + passed + " checks passed");

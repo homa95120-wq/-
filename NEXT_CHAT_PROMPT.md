@@ -67,7 +67,9 @@
 * `TurretBuild.hasAmmo()` и `TurretBuild.estimateDps()` — DPS конкретной турели.
 * `PowerGraph.getPowerBalance()/getBatteryStored()/getBatteryCapacity()`.
 * `TeamData.cores` — `Seq<CoreBuild>`, `TeamData.buildings` — `Seq<Building>`.
-* `Vars.player.unit` — контролируемый юнит (может быть `null`).
+* `Vars.player.unit()` — контролируемый юнит (может быть `null`). Поле `Player.unit`
+  **protected**, обращаться к нему из мода нельзя — только через метод `unit()`
+  (иначе сборка в CI падает с «unit has protected access in Player»).
 * Ванильная миникарта: `mindustry.ui.Minimap` шириной `Scl.scl(140)` + отступ 5.
 
 ---

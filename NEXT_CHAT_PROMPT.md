@@ -1,11 +1,10 @@
 # Передаточный промт: Campaign Threat Radar (Mindustry v8)
 
-Обновлён 2026-10-18: мод 1.7 сохраняет адаптивный HUD и планировщик защиты.
-Новая активная задача: автономно пройти одиночную кампанию Serpulo на Normal без
-человека. Пользователь выбрал проектирование под весь путь Serpulo с разработкой
-по этапам; первый рабочий этап — один сектор, с паузой/аварийным стопом. Такой
-автопилот пока **не реализован**. Ограничения, архитектура и критерии проверки —
-в `AUTOPILOT_ROADMAP.md`; `README.md` прямо предупреждает об этом.
+Обновлён 2026-10-18: мод **1.8** — HUD/планировщик из 1.7 плюс **автопилот
+этапов 0–1** (один сектор Serpulo на Normal, ▶/⏸/■ под текстом радара, по
+умолчанию выключен). Java-сборка и `AutopilotLogicCheck` проходят в CI, но
+**в настоящей игре автопилот ещё не прогонялся** — следующий шаг: прогон на
+Ground Zero, затем этап 2 (`AUTOPILOT_ROADMAP.md`, раздел «Статус»).
 Этот файл — источник истины о текущей функциональности проекта.
 Читать целиком перед любыми действиями.
 
@@ -76,10 +75,28 @@
    повреждённые постройки, статус «✅ Всё спокойно». Срочные предупреждения
    объединяются в одну строку. Патроны/ремонт не дублируются, если для них уже
    есть отдельная метка в рекомендациях.
-7. Помечен как `hidden: true` — чисто клиентский мод, не создаёт сущностей, не
+7. Помечен как `hidden: true` — радар чисто клиентский, не создаёт сущностей, не
    меняет правила, не шлёт сетевые пакеты и не мешает заходить на сервера.
+8. **Автопилот (1.8, этапы 0–1).** Под текстом — строка «🤖 Автопилот: …» и
+   кнопки ▶ Автопилот / ⏸ Пауза / ■ Стоп. Запуск только если guard пропускает:
+   `state.isCampaign()`, `planet.name == "serpulo"`,
+   `planet.campaignRules.difficulty == normal`, `!net.active()`, не game over.
+   Цель сектора: волны с `winWave > 0` и без `attackMode` (иначе «НУЖНА ПОМОЩЬ»).
+   Раз в секунду одно действие по приоритету (`AutopilotLogic.decide`):
+   ждать возрождения → дождаться очереди строительства → патроны
+   (`Call.requestItem` из ядра + `Call.transferInventory` в ItemTurret с ammo
+   < 34 %) → оборона на первом слабом подходе (`buildDefensePlan` у
+   `WeakPoint`, порядок Duo/стены/Scatter, ≤4 плана, Mender не ставится) →
+   восстановление `TeamData.plans` → бур (pneumatic/mechanical) на руде ≥3/4
+   футпринта + конвейер BFS до ядра в окне 49×49 (≤20 клеток, ≤12 буров) →
+   `logic.skipWave()` по прогнозу (ручные волны — запас ≥1, таймер — ≥3 и
+   >15 с до волны; кулдаун 20 с, ядро ≥80 %) → ручная добыча меди/свинца.
+   Резерв 40 меди. Юнит ведётся `unit.movePref()` из `Trigger.update` (alpha
+   летает). Стоп отменяет свои BuildPlan; watchdog: очередь без прогресса 45 с
+   или 5 одинаковых провалов → NEEDS_HELP. `WorldLoadEvent` всегда выключает,
+   `SectorCaptureEvent` → COMPLETE, `GameOverEvent` → NEEDS_HELP.
 
-### Формат панели 1.7 (кратко)
+### Формат панели 1.7–1.8 (кратко; в 1.8 ниже добавлены строка автопилота и 3 кнопки)
 
 ```text
 РАДАР · Волна 8/30 · следующая через 1:15
@@ -107,20 +124,26 @@
 Две сборки (**не включать одновременно — будет две панели**):
 
 * **Java (основная):**
-  `src/main/java/campaignradar/CampaignThreatRadar.java` (логика + HUD) и
-  `src/main/java/campaignradar/RadarMap.java` (карта всей области).
-  Корневой `mod.hjson` — имя `campaign-threat-radar`, версия 1.7, `main`,
+  `src/main/java/campaignradar/CampaignThreatRadar.java` (логика + HUD),
+  `src/main/java/campaignradar/RadarMap.java` (карта всей области),
+  `Autopilot.java` (мир + исполнение) и `AutopilotLogic.java` (чистые правила,
+  без импортов игры; проверки — `src/test/java/campaignradar/AutopilotLogicCheck.java`,
+  запускаются в CI через `javac`/`java` до `./gradlew jar`).
+  Корневой `mod.hjson` — имя `campaign-threat-radar`, версия 1.8, `main`,
   `java: true`, `hidden: true`, `minGameVersion: 154`. `build.gradle` — Java 17,
   зависимость `compileOnly Anuken:Mindustry:v160.7`.
 * **Скриптовая / ZIP (Rhino JS):**
   `scriptmod/` — порт логики на Rhino-JS API игры (`hidden: true`). Карта
   сделана через `extend(Packages.arc.scene.Element, {...})` (JavaAdapter).
   `scriptmod/mod.hjson` — имя `campaign-threat-radar-zip`, displayName
-  `Campaign Threat Radar (ZIP)`, версия 1.7.
+  `Campaign Threat Radar (ZIP)`, версия 1.8. Автопилот продублирован там же
+  (функции `autopilot*` + блок «autopilot glue»).
   `scriptmod/build.py` собирает `dist/CampaignThreatRadar.zip`.
-  Тесты: `node scriptmod/test-logic.js` (52 проверки, включая геометрию плана,
-  проверку занятых/водных тайлов и координаты клика) и `node scriptmod/test-hud.js`
-  (10 проверок, включая выбор участка и terrain-aware план в HUD).
+  Тесты: `node scriptmod/test-logic.js` (62 проверки, включая геометрию плана,
+  проверку занятых/водных тайлов, координаты клика и правила автопилота) и
+  `node scriptmod/test-hud.js` (22 проверки, включая выбор участка и прогон
+  автопилота на макете сектора: бур+конвейер, Duo, волна, stall, пауза/стоп,
+  сеть, загрузка мира, захват).
 
 ---
 
@@ -166,6 +189,9 @@ node scriptmod/test-logic.js
 node scriptmod/test-hud.js
 python3 scriptmod/build.py
 git status
+# Java-логика автопилота (в CI; локально нужен JDK 17):
+javac -d build/autopilot-check src/main/java/campaignradar/AutopilotLogic.java src/test/java/campaignradar/AutopilotLogicCheck.java
+java -cp build/autopilot-check campaignradar.AutopilotLogicCheck
 ```
 
 Локально в песочнице нет JDK, поэтому jar собирается только в CI
@@ -174,4 +200,14 @@ git status
 синтаксис Java можно быстро проверить npm-пакетом `java-parser`, но типы и API
 окончательно проверяет только CI-сборка `./gradlew jar`. План участка —
 эвристическая стартовая схема: она не учитывает технологический уровень,
-ресурсы, линии огня и конкретные правила размещения построек.
+ресурсы, линии огня и конкретные правила размещения построек (автопилот
+перед постановкой сам проверяет `unlockedNow()`, `Build.validPlace` и стоимость).
+
+API, использованные автопилотом (проверено по v160.7): `Events.run(Trigger.update)`
+срабатывает в начале `Logic.update()` до обновления юнитов; `DesktopInput`
+вызывает `movePref(0)`, что не гасит нашу скорость; `alpha` — `flying = true`;
+у игрока `offloadImmediately()` — добытое сразу уходит в ядро в пределах
+`mineTransferRange`; `BuilderComp` пропускает планы вне `type.buildRange`;
+`input.isBuilding` надо выставлять `true` (иначе buildautopause держит паузу);
+`sizeOffset = -((size-1)/2)` (2×2 занимает x..x+1); `logic.skipWave()` =
+кнопка волны; захват — `Logic.checkGameState()` при `wave >= winWave` и 0 врагов.

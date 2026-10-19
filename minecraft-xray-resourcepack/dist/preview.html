@@ -37,6 +37,7 @@
     position: absolute; inset: 0;
     background-image: var(--tex);
     background-size: 100% 100%;
+    background-repeat: no-repeat;
     border: 1px solid rgba(0,0,0,.35);
     box-shadow: inset 0 0 0 1px rgba(255,255,255,.08);
     backface-visibility: hidden;
@@ -54,19 +55,29 @@
   .icon {
     width: 92px; height: 92px; border-radius: 8px;
     background-image: var(--tex); background-size: 100% 100%;
+    background-repeat: no-repeat;
     box-shadow: 0 0 0 2px #000, 0 0 0 3px rgba(255,255,255,.14), 0 14px 24px rgba(0,0,0,.45);
   }
   .packpng {
     width: 92px; height: 92px; border-radius: 6px; overflow: hidden;
-    background-image: var(--tex); background-size: 100% 100%;
+    background-image: url("../assets/poster.png"); background-size: 100% 100%;
     box-shadow: 0 0 0 1px rgba(255,255,255,.18), 0 14px 24px rgba(0,0,0,.45);
   }
   .flat {
     width: 92px; height: 92px; background-image: var(--tex); background-size: 100% 100%;
+    background-repeat: no-repeat;
     box-shadow: 0 0 0 1px rgba(0,0,0,.5), 0 10px 20px rgba(0,0,0,.35);
   }
   .label { font-size: 13px; font-weight: 600; color: #efe3ea; text-align: center; }
   .label small { display: block; font-weight: 400; color: #9d92a6; margin-top: 4px; font-size: 11.5px; }
+  .sound {
+    margin-top: 22px;
+    background: linear-gradient(180deg, rgba(255,255,255,.07), rgba(255,255,255,.02));
+    border: 1px solid rgba(255,255,255,.1); border-radius: 18px;
+    padding: 18px; display: flex; flex-wrap: wrap; align-items: center; gap: 18px;
+  }
+  .sound .label { text-align: left; }
+  .sound audio { flex: 1 1 260px; max-width: 420px; }
   .note {
     margin-top: 28px; font-size: 13px; color: #9d92a6; line-height: 1.6;
     border-left: 3px solid #ff8fc4; padding-left: 14px;
@@ -76,8 +87,10 @@
 </head>
 <body>
 <div class="wrap">
-  <h1>Anime Girl Blocks <span>· 128×128</span></h1>
-  <p class="sub">Одна и та же текстура стоит на всех блоках, иконках инвентаря, воде, лаве и на иконке набора ресурсов.</p>
+  <h1>Anime Girl Blocks <span>· анимированная текстура из видео</span></h1>
+  <p class="sub">На всех блоках, иконках инвентаря, воде и лаве крутится видео:
+  полоса из 149 кадров 128×128 при 10 fps, цикл — 14,9 секунды. А звук из ролика
+  играет при любом действии с блоками и на всех музыкальных пластинках.</p>
 
   <div class="grid">
     <div class="card">
@@ -91,24 +104,51 @@
 
     <div class="card">
       <div class="stage"><div class="icon"></div></div>
-      <div class="label">Иконка в инвентаре<small>models/item/*.json</small></div>
+      <div class="label">Иконка в инвентаре<small>models/item/*.json — тоже анимирована</small></div>
     </div>
 
     <div class="card">
       <div class="stage"><div class="flat" style="border-radius:8px"></div></div>
-      <div class="label">Вода и лава<small>water_still / lava_still</small></div>
+      <div class="label">Вода и лава<small>та же анимация, полоса 32×32</small></div>
     </div>
 
     <div class="card">
       <div class="stage"><div class="packpng"></div></div>
-      <div class="label">pack.png<small>иконка набора ресурсов</small></div>
+      <div class="label">pack.png<small>кадр-постер, иконка набора ресурсов</small></div>
     </div>
   </div>
 
+  <div class="sound">
+    <div class="label">🔊 Звук из видео<small>14,9 с — ровно один цикл анимации. В игре: разрушение, установка,<br>
+      шаги и удары по любым блокам + все 21 пластинки в проигрывателе.</small></div>
+    <audio controls preload="metadata" src="../assets/video.ogg"></audio>
+  </div>
+
   <p class="note">
-    Пакет: <code>dist/AnimeGirlBlocks-1.21.10.zip</code> · заменено 1165 типов блоков.<br>
-    Это визуальное превью плоскости текстуры; в игре блоки выглядят как кубы с этой картинкой на каждой грани.
+    Пакет: <code>dist/AnimeGirlBlocks-1.21.10.zip</code> · заменено 1165 типов блоков ·
+    580 звуковых событий (559 у блоков + 21 пластинка).<br>
+    Анимация выше — настоящая полоса кадров из пака (<code>assets/anime_girl.png</code>,
+    128×19072), кадры листаются каждые 100 мс, как frametime 2 в игре.
+    В самой игре блоки выглядят как кубы с этим видео на каждой грани.
   </p>
 </div>
+<script>
+  // Листаем вертикальную полосу кадров так же, как Minecraft листает
+  // анимированную текстуру: background-size 100% x N*100%, позиция i/(N-1).
+  const strip = new Image();
+  strip.src = "../assets/anime_girl.png";
+  strip.onload = () => {
+    const frames = Math.round(strip.naturalHeight / strip.naturalWidth);
+    if (frames < 2) return;
+    const els = document.querySelectorAll(".face, .icon, .flat");
+    els.forEach(el => { el.style.backgroundSize = `100% ${frames * 100}%`; });
+    let i = 0;
+    setInterval(() => {
+      const y = (i / (frames - 1)) * 100;
+      els.forEach(el => { el.style.backgroundPosition = `50% ${y}%`; });
+      i = (i + 1) % frames;
+    }, 100);
+  };
+</script>
 </body>
 </html>

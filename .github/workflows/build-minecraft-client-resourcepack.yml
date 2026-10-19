@@ -29,6 +29,6 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           archive: false
-          name: ClientSeeThrough-1.21.10
-          path: minecraft-xray-resourcepack/dist/ClientSeeThrough-1.21.10.zip
+          name: AnimeGirlBlocks-1.21.10
+          path: minecraft-xray-resourcepack/dist/AnimeGirlBlocks-1.21.10.zip
           if-no-files-found: error

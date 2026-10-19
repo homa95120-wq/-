@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Anime Girl Blocks — превью текстур</title>
+<style>
+  :root { --tex: url("../assets/anime_girl.png"); }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; color: #f4eef2;
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    background:
+      radial-gradient(900px 500px at 15% 0%, #4a2b47 0%, transparent 60%),
+      radial-gradient(800px 500px at 90% 20%, #23324f 0%, transparent 55%),
+      #14111a;
+    display: grid; place-items: center; padding: 40px 20px;
+  }
+  .wrap { max-width: 1000px; width: 100%; }
+  h1 { font-size: clamp(22px, 3vw, 34px); margin: 0 0 6px; letter-spacing: -0.02em; }
+  h1 span { color: #ffb3d9; }
+  p.sub { margin: 0 0 34px; color: #b9aec0; font-size: 15px; line-height: 1.5; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 22px; }
+  .card {
+    background: linear-gradient(180deg, rgba(255,255,255,.07), rgba(255,255,255,.02));
+    border: 1px solid rgba(255,255,255,.1); border-radius: 18px;
+    padding: 22px 16px 16px; display: flex; flex-direction: column;
+    align-items: center; gap: 16px;
+  }
+  .stage { height: 150px; display: grid; place-items: center; perspective: 620px; }
+  .cube {
+    position: relative; width: 92px; height: 92px; transform-style: preserve-3d;
+    animation: spin 14s linear infinite;
+  }
+  .cube.paused { animation-play-state: paused; }
+  .face {
+    position: absolute; inset: 0;
+    background-image: var(--tex);
+    background-size: 100% 100%;
+    border: 1px solid rgba(0,0,0,.35);
+    box-shadow: inset 0 0 0 1px rgba(255,255,255,.08);
+    backface-visibility: hidden;
+  }
+  .face.front  { transform: translateZ(46px); }
+  .face.back   { transform: rotateY(180deg) translateZ(46px); filter: brightness(.55); }
+  .face.right  { transform: rotateY(90deg) translateZ(46px); filter: brightness(.72); }
+  .face.left   { transform: rotateY(-90deg) translateZ(46px); filter: brightness(.72); }
+  .face.top    { transform: rotateX(90deg) translateZ(46px); filter: brightness(1.22); }
+  .face.bottom { transform: rotateX(-90deg) translateZ(46px); filter: brightness(.4); }
+  @keyframes spin {
+    from { transform: rotateX(-18deg) rotateY(0deg); }
+    to   { transform: rotateX(-18deg) rotateY(360deg); }
+  }
+  .icon {
+    width: 92px; height: 92px; border-radius: 8px;
+    background-image: var(--tex); background-size: 100% 100%;
+    box-shadow: 0 0 0 2px #000, 0 0 0 3px rgba(255,255,255,.14), 0 14px 24px rgba(0,0,0,.45);
+  }
+  .packpng {
+    width: 92px; height: 92px; border-radius: 6px; overflow: hidden;
+    background-image: var(--tex); background-size: 100% 100%;
+    box-shadow: 0 0 0 1px rgba(255,255,255,.18), 0 14px 24px rgba(0,0,0,.45);
+  }
+  .flat {
+    width: 92px; height: 92px; background-image: var(--tex); background-size: 100% 100%;
+    box-shadow: 0 0 0 1px rgba(0,0,0,.5), 0 10px 20px rgba(0,0,0,.35);
+  }
+  .label { font-size: 13px; font-weight: 600; color: #efe3ea; text-align: center; }
+  .label small { display: block; font-weight: 400; color: #9d92a6; margin-top: 4px; font-size: 11.5px; }
+  .note {
+    margin-top: 28px; font-size: 13px; color: #9d92a6; line-height: 1.6;
+    border-left: 3px solid #ff8fc4; padding-left: 14px;
+  }
+  code { background: rgba(255,255,255,.09); padding: 1px 6px; border-radius: 5px; font-size: 12px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Anime Girl Blocks <span>· 128×128</span></h1>
+  <p class="sub">Одна и та же текстура стоит на всех блоках, иконках инвентаря, воде, лаве и на иконке набора ресурсов.</p>
+
+  <div class="grid">
+    <div class="card">
+      <div class="stage"><div class="cube">
+        <div class="face front"></div><div class="face back"></div>
+        <div class="face right"></div><div class="face left"></div>
+        <div class="face top"></div><div class="face bottom"></div>
+      </div></div>
+      <div class="label">Блок в мире<small>кубическая модель cube_all</small></div>
+    </div>
+
+    <div class="card">
+      <div class="stage"><div class="icon"></div></div>
+      <div class="label">Иконка в инвентаре<small>models/item/*.json</small></div>
+    </div>
+
+    <div class="card">
+      <div class="stage"><div class="flat" style="border-radius:8px"></div></div>
+      <div class="label">Вода и лава<small>water_still / lava_still</small></div>
+    </div>
+
+    <div class="card">
+      <div class="stage"><div class="packpng"></div></div>
+      <div class="label">pack.png<small>иконка набора ресурсов</small></div>
+    </div>
+  </div>
+
+  <p class="note">
+    Пакет: <code>dist/AnimeGirlBlocks-1.21.10.zip</code> · заменено 1165 типов блоков.<br>
+    Это визуальное превью плоскости текстуры; в игре блоки выглядят как кубы с этой картинкой на каждой грани.
+  </p>
+</div>
+</body>
+</html>

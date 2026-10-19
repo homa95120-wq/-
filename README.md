@@ -1,6 +1,6 @@
 # Campaign Threat Radar (v1.8)
 
-> **Minecraft Java 1.21.10 без модлоадера:** datapack с ванильными командами находится в [`minecraft-vanilla/`](minecraft-vanilla/README.md). Шуточный клиентский ресурс-пак для Minecraft с аниме-текстурой на всех стандартных блоках — в [`minecraft-xray-resourcepack/`](minecraft-xray-resourcepack/README.md). Исходный Mindustry-проект не меняется.
+> **Minecraft Java 1.21.10 без модлоадера:** datapack с ванильными командами находится в [`minecraft-vanilla/`](minecraft-vanilla/README.md). Шуточный клиентский ресурс-пак для Minecraft с анимированной текстурой из видео (и его звуком) на всех стандартных блоках — в [`minecraft-xray-resourcepack/`](minecraft-xray-resourcepack/README.md). Исходный Mindustry-проект не меняется.
 
 Клиентский тактический HUD-мод для **Mindustry v8** (билды 154+).
 

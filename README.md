@@ -1,5 +1,7 @@
 # Campaign Threat Radar (v1.8)
 
+> **Minecraft Java 1.21.10 без модлоадера:** datapack с ванильными командами находится в [`minecraft-vanilla/`](minecraft-vanilla/README.md). Клиентский набор ресурсов для локальной «просматриваемости сквозь блоки» — в [`minecraft-xray-resourcepack/`](minecraft-xray-resourcepack/README.md); он скрывает блоки, это не ESP, и на серверах может нарушать правила. Исходный Mindustry-проект не меняется.
+
 Клиентский тактический HUD-мод для **Mindustry v8** (билды 154+).
 
 Располагается в **верхнем правом углу (левее миникарты)** и отвечает на два

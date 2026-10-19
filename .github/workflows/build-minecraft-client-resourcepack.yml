@@ -1,0 +1,34 @@
+name: Build Minecraft client resource pack
+
+on:
+  push:
+    branches: ['**']
+    paths:
+      - 'minecraft-xray-resourcepack/**'
+      - '.github/workflows/build-minecraft-client-resourcepack.yml'
+  pull_request:
+    paths:
+      - 'minecraft-xray-resourcepack/**'
+      - '.github/workflows/build-minecraft-client-resourcepack.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Validate and package resource pack
+        working-directory: minecraft-xray-resourcepack
+        run: python3 build.py
+
+      - name: Upload resource pack
+        uses: actions/upload-artifact@v7
+        with:
+          archive: false
+          name: ClientSeeThrough-1.21.10
+          path: minecraft-xray-resourcepack/dist/ClientSeeThrough-1.21.10.zip
+          if-no-files-found: error

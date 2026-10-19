@@ -1,0 +1,34 @@
+name: Build vanilla Minecraft datapack
+
+on:
+  push:
+    branches: ['**']
+    paths:
+      - 'minecraft-vanilla/**'
+      - '.github/workflows/build-minecraft-vanilla.yml'
+  pull_request:
+    paths:
+      - 'minecraft-vanilla/**'
+      - '.github/workflows/build-minecraft-vanilla.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Validate and package datapack
+        working-directory: minecraft-vanilla
+        run: python3 build.py
+
+      - name: Upload datapack
+        uses: actions/upload-artifact@v7
+        with:
+          archive: false
+          name: FreeViewVanilla-1.21.10
+          path: minecraft-vanilla/dist/FreeViewVanilla-1.21.10.zip
+          if-no-files-found: error

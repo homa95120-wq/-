@@ -1,0 +1,8 @@
+{
+  "pack": {
+    "description": "Client-side see-through blocks (Java 1.21.10)",
+    "pack_format": 69,
+    "min_format": [69, 0],
+    "max_format": [69, 0]
+  }
+}

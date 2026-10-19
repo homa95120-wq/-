@@ -9,5 +9,7 @@
 # language, so it is excluded from language statistics.
 scriptmod/** linguist-documentation=true
 
-# The built ZIP is a binary release artifact.
+# Built ZIPs are binary release artifacts.
 dist/*.zip binary
+minecraft-vanilla/dist/*.zip binary
+minecraft-xray-resourcepack/dist/*.zip binary

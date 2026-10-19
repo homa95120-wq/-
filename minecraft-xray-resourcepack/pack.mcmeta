@@ -1,6 +1,6 @@
 {
   "pack": {
-    "description": "Animated video texture + its sound on every block (Java 1.21.10)",
+    "description": "Recognisable animated video textures per block family + the video's sound (Java 1.21.10)",
     "pack_format": 69,
     "min_format": [
       69,

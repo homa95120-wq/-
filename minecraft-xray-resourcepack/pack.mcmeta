@@ -1,8 +1,14 @@
 {
   "pack": {
-    "description": "Anime girl block textures (Java 1.21.10)",
+    "description": "Two girls and lightning on every block (Java 1.21.10)",
     "pack_format": 69,
-    "min_format": [69, 0],
-    "max_format": [69, 0]
+    "min_format": [
+      69,
+      0
+    ],
+    "max_format": [
+      69,
+      0
+    ]
   }
 }

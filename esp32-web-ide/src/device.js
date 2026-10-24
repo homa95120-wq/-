@@ -27,26 +27,26 @@ export class Device extends EventTarget {
 
   async connect(baud = 115200) {
     if (!Device.supported) throw new Error('Web Serial не поддерживается. Используй Chrome, Edge или Opera.');
-    const port = await navigator.serial.requestPort({
-      // Espressif, Silicon Labs CP210x, WCH CH340, FTDI
-      filters: [{ usbVendorId: 0x303a }, { usbVendorId: 0x10c4 }, { usbVendorId: 0x1a86 }, { usbVendorId: 0x0403 }],
-    }).catch(() => navigator.serial.requestPort());
+    // Без VID-фильтра: показываем также неизвестные USB-UART и системные COM-порты.
+    // Отмена не должна открывать второй диалог.
+    const port = await navigator.serial.requestPort();
     await this.open(port, baud);
   }
 
   async open(port, baud = 115200) {
-    this.port = port;
     await port.open({ baudRate: baud, bufferSize: 65536 });
+    this.port = port;
+    this.buf = '';
     this.writer = port.writable.getWriter();
     this.connected = true;
     this.baud = baud;
     this._readLoop();
     port.addEventListener('disconnect', () => this._lost());
-    this.dispatchEvent(new Event('connect'));
     // Прерываем что бы ни крутилось и показываем приглашение
     await this.write('\r\x03\x03');
     await this.sleep(100);
     await this.write('\x02\r');
+    this.dispatchEvent(new Event('connect'));
   }
 
   async disconnect() {

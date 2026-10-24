@@ -7,8 +7,9 @@ let overlay = null;
 function closeOverlay() { overlay?.remove(); overlay = null; }
 
 function labelOf(p) {
-  const vid = p.vendorId ? ` VID ${p.vendorId.toString(16).padStart(4, '0').toUpperCase()}` : '';
-  const hint = { 0x303a: 'Espressif USB', 0x10c4: 'CP210x', 0x1a86: 'CH340', 0x0403: 'FTDI' }[p.vendorId] || '';
+  const vendor = typeof p.vendorId === 'string' ? parseInt(p.vendorId, 16) : p.vendorId;
+  const vid = vendor ? ` VID ${vendor.toString(16).padStart(4, '0').toUpperCase()}` : '';
+  const hint = { 0x303a: 'Espressif USB', 0x10c4: 'CP210x', 0x1a86: 'CH340 / CH343', 0x0403: 'FTDI' }[vendor] || '';
   return `${p.portName || p.displayName || p.portId}${p.displayName && p.displayName !== p.portName ? ' — ' + p.displayName : ''}${hint ? ' · ' + hint : vid}`;
 }
 
@@ -36,7 +37,7 @@ function render(ports) {
     <div class="foot"><span style="flex:1;color:#858585;align-self:center">Подключи плату по USB — список обновится сам</span><button data-act="cancel">Отмена</button></div>
   </div>`;
   const ul = overlay.querySelector('ul');
-  if (!ports.length) ul.innerHTML = '<li class="empty">Портов не найдено. Проверь кабель (нужен кабель с данными, не только зарядка) и драйвер CP210x / CH340.</li>';
+  if (!ports.length) ul.innerHTML = '<li class="empty">Портов не найдено. Проверь кабель (нужен кабель с данными, не только зарядка) и драйвер CH343 / CH340 / CP210x. Для платы с двумя USB используй разъём COM.</li>';
   for (const p of ports) {
     const li = document.createElement('li');
     li.innerHTML = '<span>🔌</span><span></span>';
@@ -50,5 +51,5 @@ function render(ports) {
 
 let current = [];
 ipcRenderer.on('serial:ports', (_e, ports) => { current = ports; render(current); });
-ipcRenderer.on('serial:added', (_e, p) => { if (overlay) { current.push(p); render(current); } });
+ipcRenderer.on('serial:added', (_e, p) => { if (overlay) { current = current.filter(x => x.portId !== p.portId); current.push(p); render(current); } });
 ipcRenderer.on('serial:removed', (_e, p) => { if (overlay) { current = current.filter(x => x.portId !== p.portId); render(current); } });

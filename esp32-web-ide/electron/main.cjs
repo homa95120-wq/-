@@ -13,6 +13,16 @@ protocol.registerSchemesAsPrivileged([
 
 let win;
 let pendingPortCb = null;
+let availablePortIds = new Set();
+
+function trustedContents(wc) { return wc === win?.webContents; }
+function trustedOrigin(origin) {
+  try {
+    const url = new URL(origin);
+    return isDev ? url.origin === new URL(process.env.VITE_DEV_SERVER_URL).origin
+      : url.protocol === 'app:' && url.host === 'esp32studio';
+  } catch { return false; }
+}
 
 function createWindow() {
   win = new BrowserWindow({
@@ -32,19 +42,38 @@ function createWindow() {
   const ses = win.webContents.session;
 
   // --- Web Serial: выбор порта ---
-  win.webContents.on('select-serial-port', (event, portList, webContents, callback) => {
+  ses.on('select-serial-port', (event, portList, webContents, callback) => {
     event.preventDefault();
+    if (!trustedContents(webContents)) { callback(''); return; }
+    if (pendingPortCb) pendingPortCb('');
     pendingPortCb = callback;
+    availablePortIds = new Set(portList.map(p => p.portId));
     win.webContents.send('serial:ports', portList.map(p => ({
       portId: p.portId, portName: p.portName, displayName: p.displayName,
       vendorId: p.vendorId, productId: p.productId,
     })));
   });
-  win.webContents.on('serial-port-added', (_e, port) => win.webContents.send('serial:added', port));
-  win.webContents.on('serial-port-removed', (_e, port) => win.webContents.send('serial:removed', port));
+  ses.on('serial-port-added', (_e, port, wc) => {
+    if (!pendingPortCb || !trustedContents(wc)) return;
+    availablePortIds.add(port.portId);
+    win.webContents.send('serial:added', port);
+  });
+  ses.on('serial-port-removed', (_e, port, wc) => {
+    if (!pendingPortCb || !trustedContents(wc)) return;
+    availablePortIds.delete(port.portId);
+    win.webContents.send('serial:removed', port);
+  });
+  win.on('closed', () => {
+    const cb = pendingPortCb; pendingPortCb = null; availablePortIds.clear();
+    if (cb) cb('');
+  });
 
-  ses.setPermissionCheckHandler((_wc, permission) => permission === 'serial' || permission === 'usb' ? true : false);
-  ses.setDevicePermissionHandler((details) => details.deviceType === 'serial');
+  ses.setPermissionCheckHandler((wc, permission, origin) =>
+    trustedContents(wc) && permission === 'serial' && trustedOrigin(origin));
+  ses.setPermissionRequestHandler((wc, permission, callback) =>
+    callback(trustedContents(wc) && permission === 'serial' && trustedOrigin(wc.getURL())));
+  ses.setDevicePermissionHandler((details) =>
+    details.deviceType === 'serial' && trustedOrigin(details.origin));
 
   win.webContents.setWindowOpenHandler(({ url }) => { shell.openExternal(url); return { action: 'deny' }; });
 
@@ -52,8 +81,12 @@ function createWindow() {
   else win.loadURL('app://esp32studio/index.html');
 }
 
-ipcMain.on('serial:select', (_e, portId) => {
-  if (pendingPortCb) { pendingPortCb(portId || ''); pendingPortCb = null; }
+ipcMain.on('serial:select', (event, portId) => {
+  if (!trustedContents(event.sender) || typeof portId !== 'string') return;
+  if (portId && !availablePortIds.has(portId)) return;
+  const cb = pendingPortCb;
+  pendingPortCb = null; availablePortIds.clear();
+  if (cb) cb(portId);
 });
 
 app.whenReady().then(() => {

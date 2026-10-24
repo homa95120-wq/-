@@ -132,6 +132,16 @@ term.writeln('\x1b[90mESP32 Studio — терминал REPL. Нажми «⚡ �
 //  Устройство
 // ============================================================
 const dev = new Device();
+const replHint = document.createElement('div');
+replHint.hidden = true;
+replHint.style.cssText = 'position:fixed;bottom:30px;left:65px;right:20px;z-index:900;padding:12px;background:#513d16;color:#fff;border:1px solid #b58a30';
+replHint.append(document.createTextNode('Порт открыт, но MicroPython не отвечает. Если он не установлен — прошей MicroPython. Иначе проверь скорость, нажми RESET или попробуй разъём USB: REPL прошивки S3 может работать через встроенный USB. '));
+const flashHintButton = document.createElement('button');
+flashHintButton.className = 'btn';
+flashHintButton.textContent = '⚡ Перейти к прошивке';
+flashHintButton.onclick = () => { replHint.hidden = true; showView('flash'); };
+replHint.append(flashHintButton);
+document.body.append(replHint);
 dev.onData = (s) => term.write(s);
 term.onData((d) => { if (dev.connected && !dev.busy) dev.write(d).catch(() => {}); });
 
@@ -140,10 +150,12 @@ dev.addEventListener('connect', () => {
   $('#btn-connect').classList.add('connected');
   $('#sb-conn').textContent = '⚡ Подключено';
   $('#statusbar').classList.remove('disconnected');
-  toast('Плата подключена', 'ok');
+  toast('COM-порт открыт. Проверяю MicroPython…', 'ok');
+  term.writeln('\r\n[COM-порт открыт; проверка MicroPython…]');
   setTimeout(refreshDevice, 600);
 });
 dev.addEventListener('disconnect', () => {
+  replHint.hidden = true;
   $('#btn-connect').textContent = '⚡ Подключить';
   $('#btn-connect').classList.remove('connected');
   $('#sb-conn').textContent = '⚡ Не подключено';
@@ -161,7 +173,12 @@ async function toggleConnect() {
   try {
     await dev.connect(settings.baud);
   } catch (e) {
-    if (!/No port selected|cancel/i.test(e.message)) toast(e.message, 'err');
+    if (e.name === 'NotFoundError' || /No port selected|cancel/i.test(e.message)) return;
+    const message = e.name === 'NetworkError'
+      ? 'Не удалось открыть COM-порт. Закрой другие программы и окна ESP32 Studio, переподключи кабель и проверь драйвер CH343. ' + e.message
+      : e.message;
+    term.writeln('\r\n[Ошибка подключения] ' + message);
+    toast(message, 'err');
   }
 }
 
@@ -169,12 +186,17 @@ async function refreshDevice() {
   if (!dev.connected || dev.busy) return;
   try {
     const info = await dev.info();
+    replHint.hidden = true;
+    $('#sb-conn').textContent = '⚡ MicroPython';
     $('#sb-chip').textContent = `${info.machine.split(' with ')[1] || info.platform} · ${info.version}`;
     $('#dev-info').textContent =
       `${info.machine}\nMicroPython ${info.version}\nCPU: ${(info.freq / 1e6) | 0} МГц\n` +
       `Флеш: ${kb(info.fs_free)} свободно из ${kb(info.fs_total)}\nRAM свободно: ${kb(info.mem_free)}`;
     await listDevice();
   } catch (e) {
+    if (!dev.connected) return;
+    replHint.hidden = false;
+    $('#sb-conn').textContent = '⚠ COM открыт, нет ответа REPL';
     $('#dev-info').textContent = 'Нет ответа от MicroPython.\nЕсли на плате другая прошивка —\nпрошей MicroPython во вкладке ⚡.';
     term.writeln(`\r\n\x1b[33m${e.message}\x1b[0m`);
   }

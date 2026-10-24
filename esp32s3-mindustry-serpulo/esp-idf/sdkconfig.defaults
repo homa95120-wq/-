@@ -1,0 +1,19 @@
+# ESP-IDF sdkconfig.defaults для прототипа mindserpulo (ESP32-S3 N16R8)
+# Применяется через idf.py set-target esp32s3 && idf.py menuconfig (или прямо)
+
+CONFIG_IDF_TARGET_ESP32S3=y
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+
+# PSRAM для больших структур (карты, атласы, сохранения)
+CONFIG_ESP32S3_SPIRAM=y
+CONFIG_ESP32S3_SPIRAM_SIZE_8MB=y
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_QUAD=y
+CONFIG_SPIRAM_IGNORE_NOTFOUND=y
+
+# Логирование
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+CONFIG_LOG_COLORS=y
+
+# Freertos тиковый ред 1000 Гц для точного тика симуляции
+CONFIG_FREERTOS_HZ=1000

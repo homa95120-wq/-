@@ -14,7 +14,10 @@
     "dist:mac": "npm run build && electron-builder --mac"
   },
   "keywords": [],
-  "author": "ESP32 Studio",
+  "author": {
+    "name": "ESP32 Studio",
+    "email": "esp32studio@users.noreply.github.com"
+  },
   "license": "MIT",
   "devDependencies": {
     "electron": "^45.0.0",
@@ -70,11 +73,11 @@
     },
     "linux": {
       "target": [
-        "AppImage",
-        "deb"
+        "AppImage"
       ],
       "category": "Development",
-      "icon": "resources/icon.png"
+      "icon": "resources/icon.png",
+      "maintainer": "esp32studio@users.noreply.github.com"
     },
     "mac": {
       "target": [
@@ -82,6 +85,7 @@
       ],
       "category": "public.app-category.developer-tools",
       "icon": "resources/icon.png"
-    }
+    },
+    "publish": null
   }
 }

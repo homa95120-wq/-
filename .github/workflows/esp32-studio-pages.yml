@@ -1,9 +1,7 @@
 name: ESP32 Studio → GitHub Pages
 
+# Запускается вручную: сначала включи Pages в Settings → Pages → Source: GitHub Actions
 on:
-  push:
-    branches: [main]
-    paths: ['esp32-web-ide/**']
   workflow_dispatch:
 
 permissions:

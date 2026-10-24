@@ -1,0 +1,91 @@
+name: Mindustry ESP32-S3 → Firmware
+
+# Собирает прошивку прототипа «Серпуло на ESP32-S3» и кладёт готовый .bin
+# в релиз esp32-mindustry-fw-latest (одна постоянная ссылка на скачивание).
+#
+#   https://github.com/homa95120-wq/-/releases/download/esp32-mindustry-fw-latest/mindustry-esp32s3.bin
+#
+# Прошивка = headless-сервер симуляции: считает конвейеры, жидкости,
+# энергосеть, бой и A*, пишет статистику в UART. Это НЕ игра с экраном.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'esp32s3-mindustry-serpulo/esp-idf/**'
+      - 'esp32s3-mindustry-serpulo/micropython/**'
+      - 'esp32s3-mindustry-serpulo/DOWNLOAD.md'
+      - '.github/workflows/esp32-mindustry-firmware.yml'
+  pull_request:
+    paths:
+      - 'esp32s3-mindustry-serpulo/esp-idf/**'
+      - '.github/workflows/esp32-mindustry-firmware.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build firmware (ESP-IDF 5.3.1, target esp32s3)
+        uses: espressif/esp-idf-ci-action@v1
+        with:
+          esp_idf_version: v5.3.1
+          target: esp32s3
+          path: esp32s3-mindustry-serpulo/esp-idf
+          command: >-
+            idf.py build &&
+            cd build &&
+            (esptool.py --chip esp32s3 merge_bin -o mindustry-esp32s3.bin @flash_args ||
+            python -m esptool --chip esp32s3 merge_bin -o mindustry-esp32s3.bin @flash_args)
+
+      - name: Show build results
+        run: |
+          ls -la esp32s3-mindustry-serpulo/esp-idf/build/*.bin
+          ls -la esp32s3-mindustry-serpulo/esp-idf/build/*.elf
+
+      - name: Collect release files
+        run: |
+          mkdir -p release
+          cp esp32s3-mindustry-serpulo/esp-idf/build/mindustry-esp32s3.bin release/
+          cp esp32s3-mindustry-serpulo/esp-idf/build/mindserpulo.bin release/mindserpulo-app.bin || true
+          cp esp32s3-mindustry-serpulo/esp-idf/build/flash_args release/flash_args.txt || true
+          cp esp32s3-mindustry-serpulo/micropython/main.py release/main.py
+          if [ -f esp32s3-mindustry-serpulo/DOWNLOAD.md ]; then
+            cp esp32s3-mindustry-serpulo/DOWNLOAD.md release/README.md
+          fi
+          ls -la release
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mindustry-esp32s3-firmware
+          path: release/*
+          if-no-files-found: error
+
+      - name: Publish to GitHub Release (main only)
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          NOTES="Прошивка прототипа «Mindustry / Серпуло на ESP32-S3».
+          Только что собрана из коммита ${GITHUB_SHA:0:7} (ESP-IDF 5.3.1, target esp32s3).
+
+          - \`mindustry-esp32s3.bin\` — объединённый образ, прошивать по адресу 0x0 (16 МБ flash).
+          - \`main.py\` — вариант на MicroPython для ESP32 Studio (Wi-Fi AP + TCP-сервер).
+          - \`README.md\` — как прошить и что это вообще такое.
+
+          Это headless-сервер симуляции, а не игра с экраном: плата считает
+          конвейеры, жидкости, энергосеть, бой и A*, результат — в UART-логе."
+          gh release view esp32-mindustry-fw-latest >/dev/null 2>&1 || \
+            gh release create esp32-mindustry-fw-latest \
+              --prerelease \
+              --title "Mindustry / Серпуло для ESP32-S3 — прошивка (прототип)" \
+              --notes "$NOTES" \
+              --target "$GITHUB_SHA"
+          gh release upload esp32-mindustry-fw-latest release/* --clobber

@@ -1,0 +1,18 @@
+This project (esp32s3-mindustry-serpulo) is a standalone reimplementation/reimagining
+of the Serpulo planet content and mechanics from the game Mindustry.
+
+Mindustry (original game, sources used as the reference base: tag v160.7,
+commit 17012d61d9e4c3cbd9820d87e81c24495486ac53) is licensed under the
+GNU GENERAL PUBLIC LICENSE Version 3 (see LICENSE in the Mindustry source
+distribution). This port is a derivative work and is intended to be distributed
+under the same license, GNU GPL v3.
+
+NOTE: the full text of the GNU GPL v3 must be included in this file before any
+public release. It can be obtained from https://www.gnu.org/licenses/gpl-3.0.txt
+
+Original game: https://github.com/Anuken/Mindustry
+This port:     https://github.com/homa95120-wq/-  (branch arena/4850dc2f-repo)
+
+Game assets (sprites, sounds, fonts) of Mindustry may be subject to separate
+rights; this port plans to use its own or freely licensed replacements. Verify
+rights before distributing original Mindustry assets.

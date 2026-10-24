@@ -38,6 +38,7 @@ jobs:
         working-directory: esp32-web-ide
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: false
+          ESP32_STUDIO_COMMIT: ${{ github.sha }}
       - uses: actions/upload-artifact@v4
         with:
           name: ESP32-Studio-${{ matrix.artifact }}
@@ -57,6 +58,23 @@ jobs:
         with:
           path: out
           merge-multiple: true
+      - name: Generate release metadata
+        env:
+          GITHUB_SHA: ${{ github.sha }}
+        run: |
+          node -e '
+            const fs = require("fs");
+            const commit = process.env.GITHUB_SHA || "";
+            const meta = {
+              version: "1.0.0",
+              tag: "esp32-studio-latest",
+              commit,
+              shortCommit: commit.slice(0, 7),
+              publishedAt: new Date().toISOString(),
+            };
+            fs.mkdirSync("out", { recursive: true });
+            fs.writeFileSync("out/esp32-studio-release.json", JSON.stringify(meta, null, 2));
+          '
       - run: ls -la out
       - uses: softprops/action-gh-release@v2
         with:
@@ -64,8 +82,11 @@ jobs:
           name: ESP32 Studio (последняя сборка)
           body: |
             Автоматическая сборка ESP32 Studio.
+            - Версия: `1.0.0`
+            - Сборка (коммит): `${{ github.sha }}`
             - Windows: `ESP32 Studio Setup *.exe` (установщик) или `*-portable.exe` (без установки)
             - Linux: `*.AppImage` / `*.deb`
             - macOS: `*.dmg`
+            <!-- esp32-studio-release: {"version":"1.0.0","commit":"${{ github.sha }}","tag":"esp32-studio-latest"} -->
           prerelease: false
           files: out/*

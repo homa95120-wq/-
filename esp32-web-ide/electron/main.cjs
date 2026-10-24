@@ -23,6 +23,18 @@ function trustedOrigin(origin) {
       : url.protocol === 'app:' && url.host === 'esp32studio';
   } catch { return false; }
 }
+function allowedExternalUrl(rawUrl) {
+  try {
+    const u = new URL(rawUrl);
+    return u.protocol === 'https:' && (
+      u.hostname === 'github.com' ||
+      u.hostname.endsWith('.github.com') ||
+      u.hostname.endsWith('.githubusercontent.com') ||
+      u.hostname === 'micropython.org' ||
+      u.hostname.endsWith('.micropython.org')
+    );
+  } catch { return false; }
+}
 
 function createWindow() {
   win = new BrowserWindow({
@@ -75,7 +87,10 @@ function createWindow() {
   ses.setDevicePermissionHandler((details) =>
     details.deviceType === 'serial' && trustedOrigin(details.origin));
 
-  win.webContents.setWindowOpenHandler(({ url }) => { shell.openExternal(url); return { action: 'deny' }; });
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    if (allowedExternalUrl(url)) shell.openExternal?.(url);
+    return { action: 'deny' };
+  });
 
   if (isDev) win.loadURL(process.env.VITE_DEV_SERVER_URL);
   else win.loadURL('app://esp32studio/index.html');

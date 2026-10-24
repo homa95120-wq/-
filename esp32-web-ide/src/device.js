@@ -9,18 +9,74 @@
 const enc = new TextEncoder();
 const dec = new TextDecoder();
 
+/**
+ * Классифицирует причину таймаута raw REPL по байтам, полученным от платы.
+ * Отсутствие ответа на COM-порту НЕ является доказательством отсутствия MicroPython.
+ */
+export function diagnoseReplTimeout(rxText = '', baud = 115200) {
+  const text = typeof rxText === 'string' ? rxText : '';
+  const trimmed = text.trim();
+
+  if (/invalid magic byte|invalid header/i.test(text)) {
+    return {
+      kind: 'bootloader-invalid-image',
+      rxSample: trimmed.slice(-300),
+      baud,
+      summary:
+        'Загрузчик ESP32 сообщил о повреждённом или неполном образе прошивки (invalid magic byte / invalid header). ' +
+        'Проверь полное имя файла .bin (для ESP32-S3 N16R8 нужен ESP32_GENERIC_S3-SPIRAM_OCT-*.bin по адресу 0x0) и убедись, что запись дошла до конца.',
+    };
+  }
+
+  if (/waiting for download|download mode/i.test(text)) {
+    return {
+      kind: 'bootloader-download',
+      rxSample: trimmed.slice(-300),
+      baud,
+      summary:
+        'Плата находится в режиме загрузчика (waiting for download). Нажми физическую кнопку RESET на плате и повтори проверку REPL.',
+    };
+  }
+
+  if (!trimmed) {
+    return {
+      kind: 'no-data',
+      rxSample: '',
+      baud,
+      summary:
+        'COM-порт открыт, но плата не прислала данных в ответ на Ctrl+C / Ctrl+A. ' +
+        'Это не доказывает отсутствие MicroPython: на платах ESP32-S3 с двумя разъёмами (COM и USB) загрузчик работает через COM (CH343), ' +
+        'а консоль REPL MicroPython может быть выведена на встроенный разъём USB (Espressif USB-CDC, VID 303A).',
+    };
+  }
+
+  return {
+    kind: 'unexpected-output',
+    rxSample: trimmed.slice(-300),
+    baud,
+    summary:
+      'Плата присылает данные в порт, но не переходит в raw REPL MicroPython. ' +
+      'Возможно, выполняется плотный цикл без прерывания, запущена другая прошивка или скорость порта не совпадает.',
+  };
+}
+
 export class Device extends EventTarget {
   constructor() {
     super();
     this.port = null;
     this.reader = null;
     this.writer = null;
-    this.connected = false;
-    this.buf = '';          // накопитель для expect()
-    this.quiet = false;     // не слать в терминал (во время служебных команд)
-    this.running = false;   // идёт исполнение пользовательского кода в raw REPL
+    this.connected = false;      // открыт ли COM-порт
+    this.replReady = false;      // подтверждён ли ответ MicroPython REPL
+    this.buf = '';               // накопитель для expect()
+    this.lastRx = '';            // последние принятые данные (для диагностики)
+    this.lastDiagnostic = null;  // результат последней диагностики таймаута
+    this.rawTimeout = 3000;      // таймаут ожидания raw REPL (мс)
+    this.quiet = false;          // не слать в терминал (во время служебных команд)
+    this.running = false;        // идёт исполнение пользовательского кода в raw REPL
     this.busy = false;
     this.onData = () => {};
+    this._onDisconnect = () => this._lost();
   }
 
   static get supported() { return 'serial' in navigator; }
@@ -35,14 +91,22 @@ export class Device extends EventTarget {
 
   async open(port, baud = 115200) {
     await port.open({ baudRate: baud, bufferSize: 65536 });
+    try { await port.setSignals?.({ dataTerminalReady: false, requestToSend: false }); } catch {}
     this.port = port;
     this.buf = '';
+    this.lastRx = '';
+    this.lastDiagnostic = null;
+    this.replReady = false;
+    this.running = false;
+    this.busy = false;
+    this.quiet = false;
     this.writer = port.writable.getWriter();
     this.connected = true;
     this.baud = baud;
     this._readLoop();
-    port.addEventListener('disconnect', () => this._lost());
-    // Прерываем что бы ни крутилось и показываем приглашение
+    try { port.removeEventListener?.('disconnect', this._onDisconnect); } catch {}
+    port.addEventListener?.('disconnect', this._onDisconnect);
+    // Прерываем что бы ни крутилось и запрашиваем обычное приглашение
     await this.write('\r\x03\x03');
     await this.sleep(100);
     await this.write('\x02\r');
@@ -53,6 +117,11 @@ export class Device extends EventTarget {
     if (!this.port) return;
     const port = this.port;
     this.connected = false;
+    this.replReady = false;
+    this.running = false;
+    this.busy = false;
+    this.quiet = false;
+    try { port.removeEventListener?.('disconnect', this._onDisconnect); } catch {}
     try { await this.reader?.cancel(); } catch {}
     try { this.writer?.releaseLock(); } catch {}
     await this.sleep(50);
@@ -70,9 +139,31 @@ export class Device extends EventTarget {
 
   _lost() {
     if (!this.connected) return;
+    try { this.port?.removeEventListener?.('disconnect', this._onDisconnect); } catch {}
     this.connected = false;
+    this.replReady = false;
+    this.running = false;
+    this.busy = false;
+    this.quiet = false;
     this.port = null; this.reader = null; this.writer = null;
     this.dispatchEvent(new Event('disconnect'));
+  }
+
+  _flushRunBuffer() {
+    if (!this.running || !this.buf) return;
+    const endIdx = this.buf.indexOf('\x04>');
+    if (endIdx >= 0) {
+      const out = this.buf.slice(0, endIdx).replace(/\x04/g, '');
+      this.buf = this.buf.slice(endIdx + 2);
+      if (out) this.onData(out);
+      this.running = false;
+      this.write('\x02').catch(() => {});
+      this.dispatchEvent(new Event('run-end'));
+    } else {
+      const out = this.buf.replace(/\x04/g, '');
+      this.buf = '';
+      if (out) this.onData(out);
+    }
   }
 
   async _readLoop() {
@@ -84,6 +175,7 @@ export class Device extends EventTarget {
           if (done) break;
           const s = dec.decode(value, { stream: true });
           this.buf += s;
+          this.lastRx = (this.lastRx + s).slice(-4096);
           if (this.buf.length > 200000) this.buf = this.buf.slice(-100000);
           if (!this.quiet) this.onData(s);
           // программа, запущенная через run(), завершилась → вернуть обычный REPL
@@ -134,17 +226,62 @@ export class Device extends EventTarget {
 
   // ---------- raw REPL ----------
   async enterRaw() {
+    const marker = 'raw REPL; CTRL-B to exit\r\n>';
+    const firstTimeout = Math.max(20, Math.floor(this.rawTimeout * 0.6));
+    const retryTimeout = Math.max(20, this.rawTimeout - firstTimeout);
+    let captured = '';
+
     this.buf = '';
     await this.write('\r\x03\x03');     // стоп
-    await this.sleep(60);
+    await this.sleep(Math.min(60, firstTimeout));
+    captured += this.buf;
     this.buf = '';
     await this.write('\r\x01');         // raw mode
-    await this.expect('raw REPL; CTRL-B to exit\r\n>', 3000);
+
+    try {
+      await this.expect(marker, firstTimeout);
+    } catch (firstErr) {
+      captured += this.buf;
+      this.buf = '';
+      if (!this.connected) throw firstErr;
+      // Вторая попытка: выйти из возможного paste/raw режима, прервать код и снова запросить raw REPL
+      await this.write('\r\x02\r\x03\x03');
+      await this.sleep(Math.min(80, retryTimeout));
+      captured += this.buf;
+      this.buf = '';
+      await this.write('\r\x01');
+      try {
+        await this.expect(marker, retryTimeout);
+      } catch {
+        captured += this.buf;
+        this.buf = '';
+        this.replReady = false;
+        // Если во время тихого опроса плата прислала ошибки загрузчика/лог — показать их в терминале
+        if (this.quiet && captured) this.onData(captured);
+        const diag = diagnoseReplTimeout(captured || this.lastRx, this.baud);
+        this.lastDiagnostic = diag;
+        this.dispatchEvent(new CustomEvent('repl-timeout', { detail: diag }));
+        let msg = `Таймаут: плата не ответила (${JSON.stringify(marker)})`;
+        if (diag.kind === 'bootloader-invalid-image') {
+          msg += ' — загрузчик сообщил об ошибке образа прошивки (invalid magic byte / header)';
+        } else if (diag.kind === 'bootloader-download') {
+          msg += ' — плата в режиме загрузчика (нажми RESET)';
+        }
+        const err = new Error(msg);
+        err.diagnostic = diag;
+        throw err;
+      }
+    }
+
+    const wasReady = this.replReady;
+    this.replReady = true;
+    this.lastDiagnostic = null;
+    if (!wasReady) this.dispatchEvent(new Event('repl-ready'));
   }
 
   async exitRaw() { await this.write('\x02'); }
 
-  /** Выполнить код в raw REPL и вернуть {out, err}. Терминал молчит. */
+  /** Выполнить код в raw REPL и вернуть out. Терминал молчит. */
   async exec(code, timeout = 10000) {
     if (this.busy) throw new Error('Плата занята');
     this.busy = true; this.quiet = true;
@@ -152,7 +289,7 @@ export class Device extends EventTarget {
       await this.enterRaw();
       await this.write(code);
       await this.write('\x04');
-      const ok = await this.expect('OK', 3000);
+      const ok = await this.expect('OK', this.rawTimeout);
       void ok;
       const out = await this.expect('\x04', timeout);
       const err = await this.expect('\x04', timeout);
@@ -165,19 +302,28 @@ export class Device extends EventTarget {
     }
   }
 
-  /** Запустить код, вывод стримится в терминал. Не ждёт завершения. */
-  async run(code) {
+  /**
+   * Запустить код, вывод стримится в терминал.
+   * Не отмечает запуск успешным и не вызывает onStarted до ответа raw REPL ('OK').
+   */
+  async run(code, onStarted) {
     if (this.busy) throw new Error('Плата занята');
     this.busy = true; this.quiet = true;
+    this.running = false;
     try {
       await this.enterRaw();
       await this.write(code);
       await this.write('\x04');
-      await this.expect('OK', 3000);
+      await this.expect('OK', this.rawTimeout);
+      this.replReady = true;
       this.running = true;
       this.quiet = false;
+      onStarted?.();
+      this.dispatchEvent(new Event('run-start'));
       this.onData('\r\n');
+      this._flushRunBuffer();
     } catch (e) {
+      this.running = false;
       this.quiet = false;
       throw e;
     } finally {
@@ -229,7 +375,7 @@ with open(${JSON.stringify(path)},'rb') as f:
       await this.enterRaw();
       const send = async (code) => {
         await this.write(code + '\x04');
-        await this.expect('OK', 3000);
+        await this.expect('OK', this.rawTimeout);
         const out = await this.expect('\x04', 10000);
         const err = await this.expect('\x04', 10000);
         await this.expect('>', 2000);

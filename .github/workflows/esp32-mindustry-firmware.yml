@@ -39,10 +39,30 @@ jobs:
           target: esp32s3
           path: esp32s3-mindustry-serpulo/esp-idf
           command: >-
-            idf.py build &&
+            set -o pipefail;
+            { idf.py build &&
             cd build &&
             (esptool.py --chip esp32s3 merge_bin -o mindustry-esp32s3.bin @flash_args ||
-            python -m esptool --chip esp32s3 merge_bin -o mindustry-esp32s3.bin @flash_args)
+            python -m esptool --chip esp32s3 merge_bin -o mindustry-esp32s3.bin @flash_args); }
+            2>&1 | tee build-log.txt
+
+      - name: Report build log on failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          LOG=esp32s3-mindustry-serpulo/esp-idf/build-log.txt
+          if [ ! -f "$LOG" ]; then
+            echo "::error title=build::build-log.txt not found - the ESP-IDF action failed before the build started (docker pull or action error)"
+            exit 0
+          fi
+          echo "----- tail of build log -----"
+          tail -80 "$LOG" || true
+          grep -n -E "error:|CMake Error|undefined reference|FAILED:|No such file|not found" "$LOG" | head -8 | while IFS= read -r line; do
+            echo "::error title=build::$(printf '%s' "$line" | tr '\n%' '  ' | cut -c1-900)"
+          done
+          gh api "repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}/comments" \
+            -f body="$(tail -c 60000 "$LOG")" >/dev/null 2>&1 || true
 
       - name: Show build results
         run: |

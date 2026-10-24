@@ -1,0 +1,73 @@
+name: Build Serpulo Campaign Bot
+
+on:
+  push:
+    branches: ['**']
+    paths:
+      - 'mindustry-campaign-bot/**'
+      - '.github/workflows/build-mindustry-campaign-bot.yml'
+  pull_request:
+    paths:
+      - 'mindustry-campaign-bot/**'
+      - '.github/workflows/build-mindustry-campaign-bot.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  buildCampaignBot:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: 'temurin'
+          java-version: 17
+
+      - name: Pure Java campaign logic checks
+        run: |
+          mkdir -p mindustry-campaign-bot/build/logic-check
+          javac -d mindustry-campaign-bot/build/logic-check \
+            mindustry-campaign-bot/src/main/java/campaignbot/CampaignBotLogic.java \
+            mindustry-campaign-bot/src/test/java/campaignbot/CampaignBotLogicCheck.java
+          java -cp mindustry-campaign-bot/build/logic-check campaignbot.CampaignBotLogicCheck
+
+      - name: Build SerpuloCampaignBot.jar
+        run: |
+          chmod +x ./gradlew
+          ./gradlew -p mindustry-campaign-bot jar
+
+      - name: Verify SerpuloCampaignBot.jar contents and Java 17 bytecode
+        run: |
+          jar tf mindustry-campaign-bot/build/libs/SerpuloCampaignBot.jar
+          jar tf mindustry-campaign-bot/build/libs/SerpuloCampaignBot.jar | grep -qx 'mod.hjson'
+          jar tf mindustry-campaign-bot/build/libs/SerpuloCampaignBot.jar | grep -qx 'campaignbot/SerpuloCampaignBot.class'
+          unzip -p mindustry-campaign-bot/build/libs/SerpuloCampaignBot.jar campaignbot/SerpuloCampaignBot.class \
+            | head -c 8 | od -An -t u1 \
+            | awk '{ if ($8 == 61) print "class file version 61 (Java 17): OK"; else { print "unexpected class version: " $8; exit 1 } }'
+
+      - name: Test and build SerpuloCampaignBot.zip (script mod)
+        run: |
+          node mindustry-campaign-bot/test-logic.js
+          node mindustry-campaign-bot/test-campaign-sim.js
+          python3 mindustry-campaign-bot/build.py
+
+      - name: Upload SerpuloCampaignBot.jar
+        uses: actions/upload-artifact@v7
+        with:
+          archive: false
+          name: SerpuloCampaignBot-jar
+          path: mindustry-campaign-bot/build/libs/SerpuloCampaignBot.jar
+          if-no-files-found: error
+
+      - name: Upload SerpuloCampaignBot.zip
+        uses: actions/upload-artifact@v7
+        with:
+          archive: false
+          name: SerpuloCampaignBot-zip
+          path: mindustry-campaign-bot/release/SerpuloCampaignBot.zip
+          if-no-files-found: error

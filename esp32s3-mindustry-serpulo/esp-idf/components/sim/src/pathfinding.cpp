@@ -48,13 +48,6 @@ static pf_node_t *node_create(int16_t x, int16_t y) {
     return n;
 }
 
-static int node_cmp(const void *a, const void *b) {
-    const pf_node_t *na = (const pf_node_t *)a;
-    const pf_node_t *nb = (const pf_node_t *)b;
-    if (na->f != nb->f) return (na->f < nb->f) ? -1 : 1;
-    return 0;
-}
-
 /* Поиск узла с минимальным f в открытом списке (линейно — просто и надёжно) */
 static pf_node_t *open_pop_best() {
     pf_node_t *best = NULL;
@@ -106,17 +99,13 @@ bool pf_find(int16_t sx, int16_t sy, int16_t gx, int16_t gy,
             int16_t ny = cur->y + dy[d];
             if (!inb(nx, ny)) continue;
 
-            sim_tile_type_t tt = SIM_TILE_EMPTY;
-            bool has_b = false;
-            /* walkable вызывается пользователем для проверки */
-            if (!walkable(nx, ny, tt, has_b, ctx)) continue;
+            /* проходимость проверяет колбэк пользователя (реальная карта) */
+            if (!walkable(nx, ny, ctx)) continue;
 
             pf_node_t *nb = node_get(nx, ny);
-            bool created = false;
             if (!nb) {
                 nb = node_create(nx, ny);
                 if (!nb) continue;
-                created = true;
             }
             if (nb->in_closed) continue;
 
@@ -160,5 +149,6 @@ bool pf_find(int16_t sx, int16_t sy, int16_t gx, int16_t gy,
     }
     out_path->len = rlen;
     out_path->found = true;
+    ESP_LOGV(TAG, "path %d,%d -> %d,%d: %u cells", sx, sy, gx, gy, (unsigned)rlen);
     return true;
 }

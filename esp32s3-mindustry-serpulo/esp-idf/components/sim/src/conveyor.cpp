@@ -60,8 +60,6 @@ void conv_tick(conv_network_t *net, uint32_t *items_out) {
 
     /* Собираем предметы, которые должны переместиться в этом тике */
     static sim_item_stack_t move_items[SIM_MAX_CONVEYORS];
-    static int16_t move_from_x[SIM_MAX_CONVEYORS];
-    static int16_t move_from_y[SIM_MAX_CONVEYORS];
     static int16_t move_to_x[SIM_MAX_CONVEYORS];
     static int16_t move_to_y[SIM_MAX_CONVEYORS];
     static uint8_t move_progress_next[SIM_MAX_CONVEYORS];
@@ -101,8 +99,6 @@ void conv_tick(conv_network_t *net, uint32_t *items_out) {
                 /* записываем перемещение */
                 if (move_count < SIM_MAX_CONVEYORS) {
                     move_items[move_count] = s->item;
-                    move_from_x[move_count] = x;
-                    move_from_y[move_count] = y;
                     move_to_x[move_count] = tx;
                     move_to_y[move_count] = ty;
                     move_progress_next[move_count] = 0;

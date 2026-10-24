@@ -1,0 +1,70 @@
+name: ESP32 Studio → Desktop builds
+
+on:
+  push:
+    branches: [main]
+    paths: ['esp32-web-ide/**']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            script: dist:win
+            artifact: windows
+          - os: ubuntu-latest
+            script: dist:linux
+            artifact: linux
+          - os: macos-latest
+            script: dist:mac
+            artifact: macos
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: esp32-web-ide/package-lock.json
+      - run: npm ci
+        working-directory: esp32-web-ide
+      - run: npm run ${{ matrix.script }}
+        working-directory: esp32-web-ide
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: false
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ESP32-Studio-${{ matrix.artifact }}
+          path: |
+            esp32-web-ide/release/*.exe
+            esp32-web-ide/release/*.AppImage
+            esp32-web-ide/release/*.deb
+            esp32-web-ide/release/*.dmg
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push'
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: out
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: esp32-studio-latest
+          name: ESP32 Studio (последняя сборка)
+          body: |
+            Автоматическая сборка ESP32 Studio.
+            - Windows: `ESP32 Studio Setup *.exe` (установщик) или `*-portable.exe` (без установки)
+            - Linux: `*.AppImage` / `*.deb`
+            - macOS: `*.dmg`
+          prerelease: false
+          files: out/*

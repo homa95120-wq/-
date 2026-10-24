@@ -19,7 +19,24 @@ IDE в стиле Visual Studio Code для программирования ESP
 | **Примеры** | мигание, RGB-светодиод S3, Wi-Fi сканер, веб-сервер, кнопка, АЦП/ШИМ, I2C-сканер |
 | **Палитра команд** | Ctrl+Shift+P, как в VS Code; меню, контекстные меню, статус-бар |
 
-## Запуск
+## Приложение (Windows / Linux / macOS)
+
+Готовые сборки: вкладка **Releases** на GitHub → `ESP32 Studio Setup.exe` (установщик)
+или `ESP32-Studio-portable.exe` (просто запустить). Собираются автоматически при каждом изменении в `main`.
+
+Собрать самому:
+
+```bash
+cd esp32-web-ide
+npm install
+npm run app        # запустить приложение
+npm run dist:win   # собрать .exe (release/)
+```
+
+Внутри Electron: тот же интерфейс, Web Serial работает «из коробки», выбор COM-порта —
+своё окно в стиле VS Code, список обновляется при подключении платы.
+
+## Веб-версия (разработка)
 
 ```bash
 cd esp32-web-ide
@@ -57,6 +74,9 @@ npm run dev        # http://localhost:5173
 ## Как устроено
 
 ```
+electron/
+  main.cjs     окно приложения, схема app://, обработка Web Serial
+  preload.cjs  диалог выбора порта
 src/
   main.js      UI: вкладки, проводник, палитра, меню, настройки
   device.js    Web Serial + протокол raw REPL MicroPython (exec, run, файлы)

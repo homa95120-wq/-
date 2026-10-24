@@ -1,7 +1,7 @@
 name: serpulo-campaign-bot-zip
 displayName: Serpulo Campaign Bot (ZIP)
 author: local
-description: Standalone honest AI autopilot mod (script ZIP edition, no Java/JDK required) for Mindustry v8 that autonomously completes the entire Serpulo campaign from Ground Zero to Planetary Launch Terminal.
-version: 1.0
+description: Standalone honest AI autopilot mod (script ZIP edition, no Java/JDK required) for Mindustry v8 that autonomously completes the entire Serpulo campaign from Ground Zero to Planetary Launch Terminal. v2.0: pro-level chokepoint defense, ammo bus, flank RTS and an optional local Gemma 4 E2B (Ollama) strategist with an instant built-in fallback.
+version: 2.0
 minGameVersion: 154
 hidden: true

@@ -69,6 +69,8 @@ public final class CampaignBotLogic{
     public static final int CELL_WATER = 3;
     /** Natural oil liquid tile where a pump may sit. */
     public static final int CELL_OIL = 4;
+    /** Reserved conveyor corridor / Core: Nucleus 5x5 reserve: only conveyors, routers and unloaders may use it. */
+    public static final int CELL_LANE = 5;
 
     // ----------------------------------------------------------- tuning limits
 
@@ -543,6 +545,9 @@ public final class CampaignBotLogic{
         public float nextWaveHp;
         public float nextWaveDps;
         public float defensePoolHp;
+        // v2.0 strategic bias from the planner (Gemma or the built-in heuristic); empty / NaN = v1 behaviour
+        public String priority = "";
+        public float aggression = Float.NaN;
     }
 
     public static class Decision{
@@ -586,6 +591,13 @@ public final class CampaignBotLogic{
         // Keep early economy alive before over-investing in walls/turrets
         if(o.drills < 3 && o.drillPossible){
             return new Decision(ACT_DRILL, "стартовые буры (" + o.drills + "/3)");
+        }
+        // v2.0 strategic bias: the planner can pull industry / army forward
+        if(!o.captured && "EXPAND_SILICON_ECONOMY".equals(o.priority) && o.industryPossible && o.drills >= 3 && o.defenseSlots <= 2){
+            return new Decision(ACT_INDUSTRY, "стратегия: расширяю кремниевую экономику");
+        }
+        if(!o.captured && ("BUILD_T3_AIR_FLANK".equals(o.priority) || "BUILD_ARMY".equals(o.priority)) && o.armyPossible && o.drills >= 3 && o.defenseSlots <= 2){
+            return new Decision(ACT_ARMY, "стратегия: строю армию (" + o.priority + ")");
         }
         if(!o.captured && o.defenseSlots > 0){
             return new Decision(ACT_DEFEND, "укрепляю оборону (" + o.defenseSlots + ")");
@@ -635,7 +647,9 @@ public final class CampaignBotLogic{
         if(o.coreHealthFrac < MIN_CORE_HEALTH_FOR_WAVE) return "ядро повреждено — ждём починки";
         if(o.secondsSinceWaveCall < WAVE_CALL_COOLDOWN_SEC) return "пауза между волнами";
 
-        boolean strongEnough = canSurviveWave(o.defenseDps, o.defensePoolHp, o.nextWaveHp, o.nextWaveDps, o.waveTimer ? 2.2f : 1.15f);
+        if("HOLD_AND_RESEARCH".equals(o.priority) && o.waveTimer) return "стратегия: копим ресурсы и науку, волну не торопим";
+        boolean strongEnough = canSurviveWave(o.defenseDps, o.defensePoolHp, o.nextWaveHp, o.nextWaveDps,
+            (o.waveTimer ? 2.2f : 1.15f) * ProLogic.aggressionSafetyScale(o.aggression));
         if(o.waveTimer){
             if(o.waveTimeSec >= 0f && o.waveTimeSec < EARLY_CALL_MIN_TIMER_SEC){
                 return "волна скоро придёт по таймеру";
@@ -748,7 +762,7 @@ public final class CampaignBotLogic{
         for(int y = 0; y < h; y++){
             for(int x = 0; x < w; x++){
                 int i = y * w + x;
-                if(cells[i] != CELL_FREE) continue;
+                if(cells[i] != CELL_FREE && cells[i] != CELL_LANE) continue;
                 for(int d = 0; d < 4; d++){
                     int nx = x + DX[d], ny = y + DY[d];
                     if(nx >= 0 && ny >= 0 && nx < w && ny < h && cells[ny * w + nx] == CELL_CORE){
@@ -767,7 +781,7 @@ public final class CampaignBotLogic{
                 int nx = x + DX[d], ny = y + DY[d];
                 if(nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
                 int n = ny * w + nx;
-                if(cells[n] != CELL_FREE || dist[n] != -1) continue;
+                if((cells[n] != CELL_FREE && cells[n] != CELL_LANE) || dist[n] != -1) continue;
                 dist[n] = dist[i] + 1;
                 queue[tail++] = n;
             }
@@ -810,7 +824,7 @@ public final class CampaignBotLogic{
                         if(nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
                         int n = ny * w + nx;
                         if(cells[n] == CELL_CORE) touchesCore = true;
-                        else if(cells[n] == CELL_FREE && dist[n] >= 0 && dist[n] < startDist){
+                        else if((cells[n] == CELL_FREE || cells[n] == CELL_LANE) && dist[n] >= 0 && dist[n] < startDist){
                             startDist = dist[n];
                             startCell = n;
                         }
@@ -963,7 +977,7 @@ public final class CampaignBotLogic{
         int count = 0;
         for(int y = 0; y < h; y++){
             for(int x = 0; x < w; x++){
-                if(cells[y * w + x] != CELL_FREE) continue;
+                if(cells[y * w + x] != CELL_FREE && cells[y * w + x] != CELL_LANE) continue;
                 for(int d = 0; d < 4; d++){
                     int nx = x + DX[d], ny = y + DY[d];
                     if(nx >= 0 && ny >= 0 && nx < w && ny < h && cells[ny * w + nx] == CELL_CORE){
@@ -1001,14 +1015,14 @@ public final class CampaignBotLogic{
         return false;
     }
 
-    private static int findUnloaderCell(int w, int h, int[] cells, int x0, int y0, int size){
+    static int findUnloaderCell(int w, int h, int[] cells, int x0, int y0, int size){
         for(int dy = -1; dy <= size; dy++){
             for(int dx = -1; dx <= size; dx++){
                 boolean edgeX = dx == -1 || dx == size, edgeY = dy == -1 || dy == size;
                 if(edgeX == edgeY) continue;
                 int ux = x0 + dx, uy = y0 + dy;
                 if(ux < 0 || uy < 0 || ux >= w || uy >= h) continue;
-                if(cells[uy * w + ux] != CELL_FREE) continue;
+                if(cells[uy * w + ux] != CELL_FREE && cells[uy * w + ux] != CELL_LANE) continue;
                 for(int d = 0; d < 4; d++){
                     int nx = ux + DX[d], ny = uy + DY[d];
                     if(nx >= 0 && ny >= 0 && nx < w && ny < h && cells[ny * w + nx] == CELL_CORE){
@@ -1262,6 +1276,19 @@ public final class CampaignBotLogic{
             String researchText,
             String armyText,
             String detailText){
+        return formatHudText(state, capturedPresets, totalPresets, sectorTitle, phaseText, researchText, armyText, detailText, null);
+    }
+
+    public static String formatHudText(
+            int state,
+            int capturedPresets,
+            int totalPresets,
+            String sectorTitle,
+            String phaseText,
+            String researchText,
+            String armyText,
+            String detailText,
+            String thoughtLine){
         StringBuilder sb = new StringBuilder();
         sb.append("[").append(stateColor(state)).append("]🤖 Автокампания Serpulo: ")
           .append(stateName(state)).append("[]");
@@ -1281,6 +1308,9 @@ public final class CampaignBotLogic{
         }
         if(detailText != null && !detailText.isEmpty()){
             sb.append("\n💬 [lightgray]").append(detailText).append("[]");
+        }
+        if(thoughtLine != null && !thoughtLine.isEmpty()){
+            sb.append("\n").append(thoughtLine);
         }
         return sb.toString();
     }

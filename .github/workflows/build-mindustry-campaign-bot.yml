@@ -33,7 +33,10 @@ jobs:
           mkdir -p mindustry-campaign-bot/build/logic-check
           javac -d mindustry-campaign-bot/build/logic-check \
             mindustry-campaign-bot/src/main/java/campaignbot/CampaignBotLogic.java \
-            mindustry-campaign-bot/src/test/java/campaignbot/CampaignBotLogicCheck.java
+            mindustry-campaign-bot/src/main/java/campaignbot/ProLogic.java \
+            mindustry-campaign-bot/src/main/java/campaignbot/LlmBrain.java \
+            mindustry-campaign-bot/src/test/java/campaignbot/CampaignBotLogicCheck.java \
+            mindustry-campaign-bot/src/test/java/campaignbot/ProLogicCheck.java
           java -cp mindustry-campaign-bot/build/logic-check campaignbot.CampaignBotLogicCheck
 
       - name: Build SerpuloCampaignBot.jar
@@ -53,6 +56,7 @@ jobs:
       - name: Test and build SerpuloCampaignBot.zip (script mod)
         run: |
           node mindustry-campaign-bot/test-logic.js
+          node mindustry-campaign-bot/test-pro-sector.js
           node mindustry-campaign-bot/test-campaign-sim.js
           python3 mindustry-campaign-bot/build.py
 
@@ -77,13 +81,14 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          TAG="serpulo-campaign-bot-1.0"
+          TAG="serpulo-campaign-bot-2.0"
           JAR="mindustry-campaign-bot/build/libs/SerpuloCampaignBot.jar"
           ZIP="mindustry-campaign-bot/release/SerpuloCampaignBot.zip"
           JAR_SHA=$(sha256sum "$JAR" | cut -d' ' -f1)
           ZIP_SHA=$(sha256sum "$ZIP" | cut -d' ' -f1)
           NOTES=$(printf '%s\n' \
             'Самостоятельный мод автопрохождения кампании Serpulo для **Mindustry v8** (build 154+ / `v160.7`).' \
+            '**v2.0:** про-оборона на chokepoint (kill-box, слоёные стены), авто-шина боепитания, ПВО-коридор, фланговый RTS-штурм, цепочки юнитов до T5 и опциональный «мозг» Gemma 4 E2B через Ollama (`ollama pull gemma4:e2b && ollama serve`; без Ollama бот сразу работает на встроенном планировщике).' \
             '' \
             'Два готовых файла — ставьте **только один** из них (`Mods → Import file…`):' \
             '- `SerpuloCampaignBot.jar` — скомпилированный Java 17 мод (рекомендуется);' \
@@ -97,7 +102,7 @@ jobs:
           else
             gh release create "$TAG" "$JAR" "$ZIP" \
               --target "$GITHUB_SHA" \
-              --title "Serpulo Campaign Bot 1.0 — автопрохождение кампании Mindustry v8" \
+              --title "Serpulo Campaign Bot 2.0 — автопрохождение кампании Mindustry v8" \
               --notes "$NOTES" \
               --prerelease
           fi

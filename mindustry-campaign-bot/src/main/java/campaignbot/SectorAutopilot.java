@@ -87,6 +87,11 @@ public class SectorAutopilot{
     private final IntSet rejectedSites = new IntSet();
     private final Vec2 move = new Vec2();
 
+    // v2.0 pro runtime (chokepoint kill-box, ammo bus, flank RTS, Gemma brain)
+    final ProRuntime pro = new ProRuntime(this);
+    private final java.util.HashSet<String> proErrors = new java.util.HashSet<>();
+    private int prevEnemies;
+
     private float nextDecisionTime;
     private float nextResearchTime;
     private float settleUntilTime;
@@ -189,6 +194,12 @@ public class SectorAutopilot{
     }
 
     private void resetTransientSectorState(){
+        try{
+            pro.onWorldLoad();
+        }catch(Throwable t){
+            proFail("сброс", t);
+        }
+        prevEnemies = 0;
         ownPlans.clear();
         rejectedSites.clear();
         watchdog.reset();
@@ -396,6 +407,14 @@ public class SectorAutopilot{
         boolean captured = sector != null && sector.isCaptured();
         if(captured && capturedSinceSec < 0f) capturedSinceSec = nowSec;
 
+        try{
+            pro.enter(sector, core, nowSec);
+            pro.stepScan(core);
+            pro.updateHeat(data, team, core, nowSec);
+        }catch(Throwable t){
+            proFail("разведка", t);
+        }
+
         SectorObservation o = new SectorObservation();
         o.captured = captured;
         o.attackMode = Vars.state.rules.attackMode;
@@ -451,16 +470,67 @@ public class SectorAutopilot{
         o.drills = countDrills(data);
         o.powerNeeded = hasPowerDeficitOrUnlinked(data, netPowerPerSec);
 
+        java.util.HashMap<String, Boolean> usableMap = new java.util.HashMap<>();
+        java.util.HashMap<String, Integer> stockMap = new java.util.HashMap<>();
+        try{
+            usableMap = pro.usableMap();
+            stockMap = pro.stockMap(core);
+            LlmBrain.Plan brainPlan = pro.think(core, data, team, netPowerPerSec, usableMap, stockMap, nowSec);
+            if(brainPlan != null){
+                o.priority = brainPlan.priority;
+                o.aggression = brainPlan.aggression;
+            }
+            pro.retuneBus(team, nowSec);
+            pro.reactorWatch(data);
+        }catch(Throwable t){
+            proFail("мозг", t);
+        }
+
         boolean idle = o.buildQueue == 0 && !o.rearmInProgress;
         if(idle){
             o.rearmTargets = findRearmTarget(data, core) ? 1 : 0;
             o.coreUpgradeReady = planCoreOrVaultUpgrade(core, data, team, budget);
             o.powerPossible = planPowerExpansion(core, data, team, budget, netPowerPerSec);
             o.rebuildSlots = collectRebuild(data, team, budget);
-            if(!captured) o.defenseSlots = planFortressDefense(core, data, team, budget);
+            if(!captured){
+                int proSlots = -1;
+                try{
+                    int wsize = WINDOW_RADIUS * 2 + 1;
+                    int[] wcells = new int[wsize * wsize], wore = new int[wsize * wsize];
+                    int[] worigin = buildWindow(core, team, wcells, wore);
+                    proSlots = pro.planDefense(core, data, team, budget, wcells, worigin, wsize, netPowerPerSec, usableMap, stockMap, defensePlans);
+                }catch(Throwable t){
+                    proFail("оборона", t);
+                    proSlots = -1;
+                }
+                o.defenseSlots = proSlots >= 0 ? proSlots : planFortressDefense(core, data, team, budget);
+            }
             if(o.drills < MAX_DRILLS) o.drillPossible = planDrillAndConveyor(core, data, team, budget, netPowerPerSec);
             o.industryPossible = planIndustry(core, data, team, budget, netPowerPerSec);
-            o.armyPossible = planArmy(core, data, team, budget, o.attackMode, netPowerPerSec);
+            if(!o.industryPossible){
+                try{
+                    int rsize = WINDOW_RADIUS * 2 + 1;
+                    int[] rcells = new int[rsize * rsize], rore = new int[rsize * rsize];
+                    int[] rorigin = buildWindow(core, team, rcells, rore);
+                    industryPlans.clear();
+                    if(pro.planReactor(core, data, team, budget, usableMap, stockMap, netPowerPerSec, rcells, rorigin, rsize, industryPlans)){
+                        o.industryPossible = true;
+                        industryPlanLabel = "Thorium Reactor + криомиксер";
+                    }
+                }catch(Throwable t){
+                    proFail("реактор", t);
+                }
+            }
+            o.armyPossible = false;
+            if(netPowerPerSec >= 15f && core.items.get(Items.silicon) >= 45
+                    && (o.attackMode || "BUILD_T3_AIR_FLANK".equals(o.priority) || "BUILD_ARMY".equals(o.priority))){
+                try{
+                    o.armyPossible = planProUnitChain(core, data, team, budget, usableMap, sector);
+                }catch(Throwable t){
+                    proFail("цепочка юнитов", t);
+                }
+            }
+            if(!o.armyPossible) o.armyPossible = planArmy(core, data, team, budget, o.attackMode, netPowerPerSec);
             o.courierPossible = findCourierTarget(data, core);
             mineCandidate = findMineTile(unit, core, team);
             o.minePossible = mineCandidate != null;
@@ -480,6 +550,16 @@ public class SectorAutopilot{
         float[] defStats = computeDefenseStats(data, team);
         o.defenseDps = defStats[0];
         o.defensePoolHp = defStats[1];
+        pro.lastDps = defStats[0];
+        if(prevEnemies > 0 && o.enemies == 0){
+            try{
+                pro.afterWave(core);
+                pro.brain.markEvent("wave");
+            }catch(Throwable t){
+                proFail("разбор волны", t);
+            }
+        }
+        prevEnemies = o.enemies;
         float[] waveStats = computeNextWaveStats(Vars.state.wave - 1);
         o.nextWaveHp = waveStats[0];
         o.nextWaveDps = waveStats[1];
@@ -670,6 +750,7 @@ public class SectorAutopilot{
                 enemiesNearCore,
                 diff);
 
+        pro.armyCount = combatUnits.size;
         if(combatUnits.isEmpty()){
             armySummary = "0/" + unitCap + " боевых";
             return;
@@ -690,6 +771,13 @@ public class SectorAutopilot{
             Call.commandUnits(Vars.player, ids, null, closestNearEnemy, new Vec2(closestNearEnemy.x, closestNearEnemy.y), false, true);
             armySummary = combatUnits.size + "/" + unitCap + " · защита базы";
         }else if(squadMode == SQUAD_ASSAULT){
+            ProRuntime.AssaultOrder order = null;
+            try{
+                order = assaultWithRetreat(combatUnits, core, team, unitCap);
+            }catch(Throwable t){
+                proFail("RTS", t);
+            }
+            if(order != null) return;
             Building enemyTarget = findAssaultBuildingTarget(core, Vars.state.rules.waveTeam);
             if(enemyTarget != null){
                 Call.commandUnits(Vars.player, ids, enemyTarget, null, new Vec2(enemyTarget.x, enemyTarget.y), false, true);
@@ -703,6 +791,44 @@ public class SectorAutopilot{
             Call.commandUnits(Vars.player, ids, null, null, rally, false, true);
             armySummary = combatUnits.size + "/" + unitCap + " · сбор у рубежа";
         }
+    }
+
+    /**
+     * v2.0 RTS: priority target (generators, nodes, ammo feeds first), flank route around enemy turret range and
+     * retreat of wounded units (<45% HP, hysteresis) to the nearest repair spot. Returns null to fall back to v1.
+     */
+    private ProRuntime.AssaultOrder assaultWithRetreat(Seq<Unit> combatUnits, CoreBuild core, Team team, int unitCap){
+        float nowSec = Time.time / 60f;
+        ProRuntime.AssaultOrder order = pro.assaultOrder(combatUnits, core, team, nowSec);
+        if(order == null) return null;
+        Seq<Unit> healthy = new Seq<>(), wounded = new Seq<>();
+        for(Unit u : combatUnits){
+            boolean was = pro.retreating.containsKey(u.id);
+            boolean back = ProLogic.shouldRetreat(u.health / Math.max(1f, u.maxHealth), was);
+            if(back) pro.retreating.put(u.id, Boolean.TRUE);
+            else pro.retreating.remove(u.id);
+            (back ? wounded : healthy).add(u);
+        }
+        if(wounded.size > 0){
+            int[] wid = new int[Math.min(wounded.size, 180)];
+            for(int i = 0; i < wid.length; i++) wid[i] = wounded.get(i).id;
+            Call.commandUnits(Vars.player, wid, null, null, pro.repairSpot(team, core), false, true);
+        }
+        if(healthy.size > 0){
+            int[] hid = new int[Math.min(healthy.size, 180)];
+            for(int i = 0; i < hid.length; i++) hid[i] = healthy.get(i).id;
+            if(order.last && order.target != null && order.target.isValid()){
+                Call.commandUnits(Vars.player, hid, order.target, null, new Vec2(order.target.x, order.target.y), false, true);
+            }else{
+                Call.commandUnits(Vars.player, hid, null, null, new Vec2(order.wx, order.wy), false, true);
+            }
+        }
+        pro.armyCount = combatUnits.size;
+        armySummary = combatUnits.size + "/" + unitCap + " · штурм"
+                + (order.target != null ? " (" + order.target.block.localizedName + ")" : "")
+                + (order.flank ? " · обход по флангу" : "")
+                + (wounded.size > 0 ? " · отвод раненых: " + wounded.size : "");
+        return order;
     }
 
     private Building findAssaultBuildingTarget(CoreBuild ourCore, Team enemyTeam){
@@ -1006,7 +1132,7 @@ public class SectorAutopilot{
 
         // 3. Silicon Smelter (up to 3 — backbone of units & mid-game tech!)
         if(usable(Blocks.siliconSmelter)
-                && countBlock(data, Blocks.siliconSmelter) < 3
+                && countBlock(data, Blocks.siliconSmelter) < (pro.plan != null && "EXPAND_SILICON_ECONOMY".equals(pro.plan.priority) ? 5 : 3)
                 && core.items.get(Items.silicon) < 1800
                 && core.items.get(Items.coal) >= 15
                 && core.items.get(Items.sand) >= 20){
@@ -1321,6 +1447,66 @@ public class SectorAutopilot{
         return true;
     }
 
+    /** v2.0: factory + reconstructor chain up to T4/T5 (Exponential / Tetrative via PayloadConveyor). */
+    private boolean planProUnitChain(CoreBuild core, TeamData data, Team team, int[] budget,
+                                     java.util.HashMap<String, Boolean> usableMap, Sector sector){
+        armyPlans.clear();
+        int diff = sector != null && sector.preset != null ? (int)sector.preset.difficulty : 4;
+        java.util.HashMap<String, Boolean> unlocked = new java.util.HashMap<>();
+        for(String[] line : ProLogic.UNIT_LINES){
+            for(String un : line){
+                UnitType ut = Vars.content.getByName(mindustry.ctype.ContentType.unit, un);
+                unlocked.put(un, ut != null && ut.unlockedNow() && !ut.isBanned());
+            }
+        }
+        for(String bn : new String[]{"ground-factory", "air-factory", "naval-factory", "additive-reconstructor",
+                "multiplicative-reconstructor", "exponential-reconstructor", "tetrative-reconstructor"}){
+            unlocked.put(bn, Boolean.TRUE.equals(usableMap.get(bn)));
+        }
+        ProLogic.WaveReport fc = pro.sched;
+        boolean preferAir = "BUILD_T3_AIR_FLANK".equals(pro.plan != null ? pro.plan.priority : "") || (fc != null && fc.airShareNext >= 0.5f);
+        boolean hasWater = pro.scan != null && pro.scan.counts.containsKey("water");
+        ProLogic.UnitLinePlan line = ProLogic.chooseUnitLine(diff, unlocked, preferAir, hasWater);
+        if(line == null || line.tiers < 3) return false;
+        Block facB = ProRuntime.block(line.factory);
+        if(!(facB instanceof UnitFactory uf) || countBlock(data, facB) >= 2) return false;
+
+        int size = WINDOW_RADIUS * 2 + 1;
+        int[] cells = new int[size * size], ore = new int[size * size];
+        int[] origin = buildWindow(core, team, cells, ore);
+        for(int tiers = line.tiers; tiers >= 3; tiers--){
+            ProLogic.ChainSlot chain = ProLogic.findUnitChainSlotTiers(size, size, cells, WINDOW_RADIUS, WINDOW_RADIUS, usable(Blocks.unloader), tiers);
+            if(chain == null) continue;
+            int[] work = budget.clone();
+            Seq<BuildPlan> list = new Seq<>();
+            boolean good = true;
+            for(int st = 0; st < chain.stages.size() && good; st++){
+                ProLogic.ChainStage stg = chain.stages.get(st);
+                Block sb = st == 0 ? facB : ("payload".equals(stg.kind) ? ProRuntime.block("payload-conveyor") : ProRuntime.block(stg.kind));
+                int sx = origin[0] + stg.cx, sy = origin[1] + stg.cy;
+                if(sb == null || !usable(sb) || !Build.validPlace(sb, team, sx, sy, chain.rotation) || !reserve(work, sb, 1)){
+                    good = false;
+                    break;
+                }
+                Object cfg = null;
+                if(st == 0){
+                    int idx = findPlanIndex(uf, Vars.content.getByName(mindustry.ctype.ContentType.unit, line.chain[0]));
+                    if(idx >= 0) cfg = Integer.valueOf(idx);
+                }
+                list.add(new BuildPlan(sx, sy, chain.rotation, sb, cfg));
+            }
+            if(!good) continue;
+            if(chain.hasUnloader && usable(Blocks.unloader) && reserve(work, Blocks.unloader, 1)){
+                list.add(new BuildPlan(origin[0] + chain.unloaderX, origin[1] + chain.unloaderY, 0, Blocks.unloader));
+            }
+            System.arraycopy(work, 0, budget, 0, budget.length);
+            armyPlans.addAll(list);
+            armyPlanLabel = line.chain[line.chain.length - 1] + " (T" + tiers + ")";
+            return true;
+        }
+        return false;
+    }
+
     private boolean tryPlaceNavalFactory(CoreBuild core, Team team, int[] budget){
         if(!(Blocks.navalFactory instanceof UnitFactory nf)) return false;
         for(int r = 4; r <= 28; r++){
@@ -1559,16 +1745,31 @@ public class SectorAutopilot{
         rearmCandidate = null;
         rearmCandidateItem = null;
         float bestDst = Float.MAX_VALUE;
+        java.util.HashMap<String, Integer> proStock = new java.util.HashMap<>();
+        try{
+            proStock = pro.stockMap(core);
+        }catch(Throwable t){
+            proFail("склад", t);
+        }
 
         for(Building b : data.buildings){
             if(!(b instanceof ItemTurretBuild tb) || !(b.block instanceof ItemTurret block)) continue;
             if(tb.totalAmmo >= block.maxAmmo * REARM_FRACTION) continue;
+            boolean busFed = false;
+            Item wanted = null;
+            try{
+                busFed = pro.busBuilt && pro.nearBus(b) && tb.totalAmmo >= block.maxAmmo * 0.15f;
+                wanted = pro.preferredAmmo(b, proStock);
+            }catch(Throwable t){
+                proFail("боепитание", t);
+            }
+            if(busFed) continue;
             Item bestAmmo = null;
             float bestScore = -1f;
             for(var entry : block.ammoTypes.entries()){
                 int have = core.items.get(entry.key);
                 if(have < MIN_AMMO_STOCK) continue;
-                float score = entry.value.estimateDPS() * 10f + Math.min(have, 200);
+                float score = entry.value.estimateDPS() * 10f + Math.min(have, 200) + (entry.key == wanted ? 400f : 0f);
                 if(score > bestScore){
                     bestScore = score;
                     bestAmmo = entry.key;
@@ -1745,7 +1946,7 @@ public class SectorAutopilot{
         return rebuildPlans.size;
     }
 
-    private int[] buildWindow(CoreBuild core, Team team, int[] cells, int[] ore){
+    int[] buildWindow(CoreBuild core, Team team, int[] cells, int[] ore){
         int size = WINDOW_RADIUS * 2 + 1;
         int ox = core.tileX() - WINDOW_RADIUS, oy = core.tileY() - WINDOW_RADIUS;
         for(int y = 0; y < size; y++){
@@ -1772,6 +1973,12 @@ public class SectorAutopilot{
                     ore[i] = drop.id;
                 }
             }
+        }
+        try{
+            ProLogic.applyCoreZones(size, size, cells, WINDOW_RADIUS, WINDOW_RADIUS, core.block.size, 12,
+                    core.block.size == 4 && usable(Blocks.coreNucleus), ore);
+        }catch(Throwable t){
+            proFail("зоны ядра", t);
         }
         return new int[]{ox, oy};
     }
@@ -1830,7 +2037,7 @@ public class SectorAutopilot{
         return g;
     }
 
-    private int[] coreBudget(CoreBuild core){
+    int[] coreBudget(CoreBuild core){
         int[] budget = new int[Vars.content.items().size];
         for(Item item : Vars.content.items()){
             budget[item.id] = core.items.get(item);
@@ -1838,7 +2045,7 @@ public class SectorAutopilot{
         return budget;
     }
 
-    private boolean reserve(int[] budget, Block block, int count){
+    boolean reserve(int[] budget, Block block, int count){
         if(block == null || count <= 0){
             return count == 0;
         }
@@ -1855,7 +2062,7 @@ public class SectorAutopilot{
         return true;
     }
 
-    private static boolean usable(Block block){
+    static boolean usable(Block block){
         return block != null && block.unlockedNow() && block.isPlaceable() && block.environmentBuildable();
     }
 
@@ -1915,7 +2122,7 @@ public class SectorAutopilot{
         return min;
     }
 
-    private int[] findValidSpotNear(Block block, Team team, int tx, int ty, int maxRadius){
+    int[] findValidSpotNear(Block block, Team team, int tx, int ty, int maxRadius){
         for(int r = 0; r <= maxRadius; r++){
             for(int dy = -r; dy <= r; dy++){
                 for(int dx = -r; dx <= r; dx++){
@@ -2022,6 +2229,21 @@ public class SectorAutopilot{
     private void action(String text){
         lastAction = text;
         log(text);
+    }
+
+    /** Journal entry written by the v2.0 pro runtime. */
+    void logPro(String text){
+        log(text);
+    }
+
+    boolean isRejected(int x, int y){
+        return rejectedSites.contains(pack(x, y));
+    }
+
+    private void proFail(String label, Throwable t){
+        if(proErrors.add(label)){
+            log("про-модуль «" + label + "» временно отключён, работает v1: " + t);
+        }
     }
 
     private void log(String text){

@@ -715,6 +715,8 @@ public class SectorAutopilot{
         Seq<Unit> combatUnits = new Seq<>();
         Unit playerUnit = Vars.player == null ? null : Vars.player.unit();
 
+        // Java: Unit.dead() is a real method of Healthc, so this call is safe here.
+        // Only the Rhino (script/ZIP) edition sees `dead` as a boolean field and must use unitDead().
         Groups.unit.each(u -> {
             if(u.team != team || u == playerUnit || u.dead() || !u.isCommandable()) return;
             CommandAI ai = u.command();

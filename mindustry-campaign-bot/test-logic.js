@@ -292,7 +292,9 @@ for (const drillSize of [2, 3, 4]) {
     for (let i = 0; i < 8; i++) {
         combatUnits.push({
             id: i + 1, team: 1, type: UnitTypes.dagger,
-            dead: () => false, isCommandable: () => true,
+            // Rhino exposes Unit.dead as a plain boolean FIELD, never as a method (v2.0 crash).
+            dead: false, health: 100, maxHealth: 100,
+            isCommandable: () => true, isFlying: () => false,
             command: () => ({ command: null, setStance() {} })
         });
     }
@@ -371,7 +373,9 @@ for (const drillSize of [2, 3, 4]) {
         control: { input: { isBuilding: false }, checkAutoUnlocks() {} },
         logic: { skipWave() {} },
         player: {
-            team: () => 1, closestCore: () => coreBuild, unit: () => playerUnit, dead: () => false,
+            team: () => 1, closestCore: () => coreBuild, unit: () => playerUnit,
+            dead: false, // boolean field in Rhino, not a method
+
             within: () => true
         },
         state: {
@@ -418,6 +422,65 @@ for (const drillSize of [2, 3, 4]) {
     ok(builtCrafters >= 1, `In-sector AI built industrial crafters (${builtCrafters})`);
     ok(builtFactories >= 1, `In-sector AI built unit factories (${builtFactories})`);
     ok(commandedUnitsCount === 8, `RTS commander issued assault orders to ${commandedUnitsCount} combat units`);
+
+    // ---- regression (v2.0.1 crash): Unit.dead / Unit.health / Unit.isFlying are FIELDS in Rhino.
+    // In game `e.dead()` threw `TypeError: Cannot call property dead ... it is "boolean"` and killed
+    // the whole client. Helpers must accept both shapes, and the update loop must survive an error.
+    ok(bot.unitDead(null) === true, "unitDead(null) is dead");
+    ok(bot.unitDead({ dead: true }) === true, "unitDead: boolean field dead=true");
+    ok(bot.unitDead({ dead: false }) === false, "unitDead: boolean field dead=false");
+    ok(bot.unitDead({ dead: () => true }) === true, "unitDead: legacy method-form still supported");
+    ok(bot.unitDead({ dead: () => false }) === false, "unitDead: method-form alive");
+    ok(bot.unitDead({ health: 0 }) === true && bot.unitDead({ health: 12 }) === false, "unitDead: falls back to health");
+    ok(bot.unitFlying({ isFlying: true }) === true && bot.unitFlying({ isFlying: () => true }) === true && bot.unitFlying({ isFlying: false }) === false, "unitFlying: field and method both work");
+    ok(bot.unitCommandable({ isCommandable: true }) === true && bot.unitCommandable({ isCommandable: () => true }) === true, "unitCommandable: field and method both work");
+    ok(bot.playerDead({ dead: true }) === true && bot.playerDead({ dead: false }) === false && bot.playerDead({ dead: () => false }) === false, "playerDead: field and method both work");
+    ok(bot.memberValid({ isValid: () => true }) === true && bot.memberValid({ isValid: () => false }) === false && bot.memberValid(null) === false, "memberValid guards isValid()");
+
+    {
+        // enemy flare next to the core: its `dead`/`isFlying` are boolean fields, exactly like in game
+        const enemyFlare = {
+            id: 9001, team: 2, type: UnitTypes.flare,
+            x: coreBuild.x + 120, y: coreBuild.y,
+            dead: false, health: 70, maxHealth: 70, isFlying: true
+        };
+        let filterCalls = 0, heatRadiusCalls = 0;
+        global.Units.closestEnemy = (team, x, y, r, filter) => {
+            filterCalls++;
+            if (r === 14 * global.Vars.tilesize) heatRadiusCalls++; // proUpdateHeat's AA probe
+            return (!filter || filter(enemyFlare)) ? enemyFlare : null;
+        };
+        // a corpse in Groups.unit: `dead` is a boolean field, it must be skipped by updateArmySquads
+        combatUnits.push({
+            id: 4242, team: 1, type: UnitTypes.dagger,
+            dead: true, health: 0, maxHealth: 100, isFlying: false,
+            isCommandable: () => true,
+            command: () => ({ command: null, setStance() {} })
+        });
+        let damaged = null;
+        teamBuildings.each(b => { if (!damaged && b !== coreBuild) damaged = b; });
+
+        const errorsBefore = inst.loopErrors;
+        const journalBefore = inst.journal.length;
+        let threw = null;
+        for (let cycle = 0; cycle < 4; cycle++) {
+            if (damaged) damaged.health -= 40; // forces proUpdateHeat to probe `!dead && isFlying`
+            global.Time.time += 200;
+            try { inst.thinkInSector(playerUnit); } catch (e) { threw = e; }
+            while (!playerUnit.plans.isEmpty()) {
+                const pl = playerUnit.plans.first();
+                playerUnit.plans.remove(pl);
+                placeBuilding(pl);
+            }
+        }
+        const newJournal = inst.journal.slice(journalBefore);
+        ok(!threw, "thinkInSector survives boolean `dead` fields (no throw): " + threw);
+        ok(inst.loopErrors === errorsBefore, "no update stage failed: " + newJournal.join(" / "));
+        ok(!newJournal.some(j => j.indexOf("сбой в цикле") >= 0), "no loop error was logged: " + newJournal.join(" / "));
+        ok(filterCalls > 0, "Units.closestEnemy predicates were actually evaluated");
+        ok(heatRadiusCalls > 0, "proUpdateHeat AA probe ran its !dead && isFlying filter");
+        ok(inst.pro.armyCount === 8, "the dead unit is excluded from the army (" + inst.pro.armyCount + " combat)");
+    }
 }
 
 

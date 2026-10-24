@@ -1,8 +1,8 @@
 name: serpulo-campaign-bot
 displayName: Serpulo Campaign Bot
 author: local
-description: Standalone honest AI autopilot mod for Mindustry v8 that completes the entire Serpulo campaign by itself: builds drills, conveyors, power networks, industrial chains, multi-tier defenses, and unit reconstructor lines, commands RTS assault armies against enemy bases, researches the TechTree using real resources, and launches from Ground Zero to Planetary Launch Terminal. v2.0: chokepoint kill-box fortresses, automatic ammo bus, AA corridor, flank RTS assaults and an optional local Gemma 4 E2B (Ollama) strategist with an instant built-in fallback.
-version: 2.0
+description: Standalone honest AI autopilot mod for Mindustry v8 that completes the entire Serpulo campaign by itself: builds drills, conveyors, power networks, industrial chains, multi-tier defenses, and unit reconstructor lines, commands RTS assault armies against enemy bases, researches the TechTree using real resources, and launches from Ground Zero to Planetary Launch Terminal. v2.0: chokepoint kill-box fortresses, automatic ammo bus, AA corridor, flank RTS assaults and an optional local Gemma 4 E2B (Ollama) strategist with an instant built-in fallback. v2.0.1: Rhino-safe unit accessors (Unit.dead/isFlying are fields in the script engine) and a crash-proof update loop.
+version: 2.0.1
 minGameVersion: 154
 main: campaignbot.SerpuloCampaignBot
 java: true

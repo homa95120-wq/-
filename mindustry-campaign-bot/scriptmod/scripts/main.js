@@ -13,6 +13,12 @@
  *   blast compound, phase fabric, surge alloy), multi-tier fortresses, UnitFactory
  *   + Reconstructor T1->T2->T3 chains, and RTS CommandAI squad assaults.
  * - Client-only (`hidden: true`) and strictly refuses to act in multiplayer.
+ *
+ * v2.0.1: Rhino exposes Java *fields* before methods, so `unit.dead` is a boolean
+ * in game even though the compiled Java mod calls `unit.dead()`. Every unit
+ * accessor now goes through readMember()/unitDead()/unitFlying()/... and every
+ * update stage runs inside loopSafe(), which logs a failure once and keeps the
+ * game (and the campaign) running.
  */
 
 // ------------------------------------------------------------------ states
@@ -116,6 +122,68 @@ function guardReason(g) {
     if (g.planet !== "serpulo") return "текущая планета не Serpulo";
     if (g.canBuild === false) return "текущий юнит не умеет строить";
     return null;
+}
+
+// ------------------------------------------------ Rhino field/method safety
+
+/**
+ * Reads a Mindustry member that may be exposed as a plain field OR as a
+ * no-argument method.
+ *
+ * In the compiled Java mod every accessor is a real method (`unit.dead()`),
+ * but Rhino (the in-game script engine) resolves a *field* first and a boolean
+ * field shadows the method with the same name. That is exactly what crashed
+ * v2.0 in game: `TypeError: Cannot call property dead in object Unit#1816:flare
+ * ... it is "boolean"`. Reading through this helper works in both worlds:
+ * a function is called, a field is returned as-is, anything that throws
+ * yields `undefined` instead of taking the whole update loop down.
+ */
+function readMember(obj, name) {
+    if (!obj) return undefined;
+    var value;
+    try { value = obj[name]; } catch (e) { return undefined; }
+    if (typeof value === "function") {
+        try { return value.call(obj); } catch (e) { return undefined; }
+    }
+    return value;
+}
+
+/** True when a unit is dead/gone. Works with `dead` as boolean field or as method. */
+function unitDead(u) {
+    if (!u) return true;
+    var d = readMember(u, "dead");
+    if (d === true) return true;
+    var hp = readMember(u, "health");
+    if (typeof hp === "number" && hp <= 0) return true;
+    return false;
+}
+
+/** True when a unit is alive and still valid (Rhino-safe counterpart of `u.isValid()`). */
+function unitAlive(u) {
+    if (!u || unitDead(u)) return false;
+    return readMember(u, "isValid") !== false;
+}
+
+/** True when `isFlying` is either a boolean field or a method returning true. */
+function unitFlying(u) {
+    return readMember(u, "isFlying") === true;
+}
+
+/** True when a unit accepts RTS commands (`isCommandable` as field or method). */
+function unitCommandable(u) {
+    return readMember(u, "isCommandable") === true;
+}
+
+/** True when the player pawn is dead (in Rhino `dead` is a boolean field). */
+function playerDead(p) {
+    if (!p) return true;
+    return readMember(p, "dead") === true;
+}
+
+/** Safe `isValid()` for any game object (units, buildings, plans). */
+function memberValid(o) {
+    if (!o) return false;
+    return readMember(o, "isValid") !== false;
 }
 
 var ESSENTIAL_TIER_3 = {
@@ -2719,7 +2787,9 @@ function installMindustryCampaignBot() {
         transferItem: null,
         transferLabel: "",
         squadMode: SQUAD_RALLY,
-        collapsed: false
+        collapsed: false,
+        loopErrors: 0,
+        loopErrLogged: {}
     };
 
     var hudLabel = null;
@@ -2739,6 +2809,28 @@ function installMindustryCampaignBot() {
         bot.journal.push(msg);
         if (bot.journal.length > 10) bot.journal.shift();
         try { Log.info("[serpulo-campaign-bot] @", msg); } catch (ignored) {}
+    }
+
+    /**
+     * Guards every stage of the per-tick update loop. A single broken game
+     * member (a field that is not a method in Rhino, a stale Unit, a mod
+     * conflict) must never crash the game: the stage is skipped, the failure is
+     * logged exactly once through botLog(), and the remaining stages keep
+     * running on the next tick.
+     */
+    function loopSafe(label, fn, fallback) {
+        try {
+            return fn();
+        } catch (e) {
+            bot.loopErrors++;
+            if (!bot.loopErrLogged[label]) {
+                bot.loopErrLogged[label] = true;
+                var detail = "";
+                try { detail = e && e.message ? String(e.message) : String(e); } catch (ignored) { detail = "неизвестная ошибка"; }
+                botLog("сбой в цикле «" + label + "»: " + detail + " — пропускаю этот шаг, бот продолжает работу");
+            }
+            return fallback;
+        }
     }
 
     function saveEnabled(flag) {
@@ -2777,7 +2869,7 @@ function installMindustryCampaignBot() {
         var p = Vars.state.getPlanet();
         g.planet = p ? String(p.name) : "";
         var u = Vars.player ? Vars.player.unit() : null;
-        g.canBuild = !u || !u.isValid() || !!u.canBuild();
+        g.canBuild = !u || !memberValid(u) || !!u.canBuild();
         return g;
     }
 
@@ -3309,7 +3401,7 @@ function installMindustryCampaignBot() {
 
     function clearMining() {
         var u = Vars.player ? Vars.player.unit() : null;
-        if (u && u.isValid() && u.mineTile) u.mineTile = null;
+        if (u && memberValid(u) && u.mineTile) u.mineTile = null;
     }
 
     function haltUnitActions() {
@@ -3318,7 +3410,7 @@ function installMindustryCampaignBot() {
         bot.transferTarget = null;
         clearMining();
         var u = Vars.player ? Vars.player.unit() : null;
-        if (u && u.isValid()) {
+        if (u && memberValid(u)) {
             for (var i = 0; i < bot.ownPlans.length; i++) {
                 u.plans.remove(bot.ownPlans[i], true);
             }
@@ -3485,7 +3577,7 @@ function installMindustryCampaignBot() {
         var combat = [];
         var pUnit = Vars.player ? Vars.player.unit() : null;
         seqEach(Groups.unit, function (u) {
-            if (!u || u.team !== team || u === pUnit || u.dead() || !u.isCommandable()) return;
+            if (!u || u.team !== team || u === pUnit || unitDead(u) || !unitCommandable(u)) return;
             var ai = u.command();
             if (u.type === UnitTypes.mono) {
                 if (ai.command !== UnitCommand.mineCommand) ai.command(UnitCommand.mineCommand);
@@ -3503,7 +3595,7 @@ function installMindustryCampaignBot() {
             if (u.type.canAttack) combat.push(u);
         });
 
-        var nearEnemy = Units.closestEnemy(team, core.x, core.y, 42 * Vars.tilesize, boolf(function (e) { return !e.dead(); }));
+        var nearEnemy = Units.closestEnemy(team, core.x, core.y, 42 * Vars.tilesize, boolf(function (e) { return !unitDead(e); }));
         var diff = sector && sector.preset ? sector.preset.difficulty : 4;
         var cap = Units.getCap(team);
         bot.squadMode = decideSquadMode(!!Vars.state.rules.attackMode, bot.squadMode, combat.length, cap, nearEnemy ? 1 : 0, diff);
@@ -3805,7 +3897,7 @@ function installMindustryCampaignBot() {
             var prev = pro.prevHp[key];
             if (prev !== undefined && hp < prev - 1) {
                 var air = false;
-                var en = Units.closestEnemy(team, b.x, b.y, 14 * Vars.tilesize, boolf(function (e) { return !e.dead() && e.isFlying(); }));
+                var en = Units.closestEnemy(team, b.x, b.y, 14 * Vars.tilesize, boolf(function (e) { return !unitDead(e) && unitFlying(e); }));
                 if (en) air = true;
                 pro.heat.record(Math.round(b.x / Vars.tilesize), Math.round(b.y / Vars.tilesize), prev - hp, air);
             }
@@ -4180,7 +4272,7 @@ function installMindustryCampaignBot() {
         var cx = 0, cy = 0, groundN = 0;
         for (var u = 0; u < combat.length; u++) {
             cx += combat[u].x; cy += combat[u].y;
-            if (!combat[u].isFlying()) groundN++;
+            if (!unitFlying(combat[u])) groundN++;
         }
         cx = Math.round(cx / combat.length / Vars.tilesize); cy = Math.round(cy / combat.length / Vars.tilesize);
         var key = target.kind + ":" + target.x + ":" + target.y;
@@ -4286,7 +4378,12 @@ function installMindustryCampaignBot() {
         return sit;
     }
 
+    /** One decision tick. Never throws: a failing stage is logged once and skipped. */
     function thinkInSector(unit) {
+        return loopSafe("решение в секторе", function () { return thinkInSectorStep(unit); }, undefined);
+    }
+
+    function thinkInSectorStep(unit) {
         var nowSec = Time.time / 60;
         var sector = Vars.state.getSector();
 
@@ -4306,8 +4403,8 @@ function installMindustryCampaignBot() {
         proStepScan(core);
         proSafe("тепловая карта", function () { proUpdateHeat(data, team, core, nowSec); }, null);
 
-        maintainFactoriesAndPower(data, team);
-        updateArmySquads(data, core, team, sector);
+        loopSafe("заводы и энергия", function () { maintainFactoriesAndPower(data, team); }, null);
+        loopSafe("армия", function () { updateArmySquads(data, core, team, sector); }, null);
 
         var captured = !!(sector && sector.isCaptured());
         if (captured && bot.capturedSinceSec < 0) bot.capturedSinceSec = nowSec;
@@ -4367,7 +4464,7 @@ function installMindustryCampaignBot() {
         if (unit.plans.size > 0) Vars.control.input.isBuilding = true;
 
         obs.buildQueue = unit.plans.size;
-        obs.rearmInProgress = bot.transferStage !== 0 && bot.transferTarget && bot.transferTarget.isValid();
+        obs.rearmInProgress = bot.transferStage !== 0 && !!bot.transferTarget && memberValid(bot.transferTarget);
         if (!obs.rearmInProgress) bot.transferStage = 0;
 
         var budget = coreBudget(core);
@@ -4896,7 +4993,7 @@ function installMindustryCampaignBot() {
 
     function runItemTransfer(unit, core) {
         var range = Vars.itemTransferRange * 0.78;
-        if (!bot.transferTarget || !bot.transferTarget.isValid() || !bot.transferItem) {
+        if (!bot.transferTarget || !memberValid(bot.transferTarget) || !bot.transferItem) {
             bot.transferStage = 0; return;
         }
         if (unit.stack.amount > 0 && unit.item() !== bot.transferItem) {
@@ -5004,6 +5101,10 @@ function installMindustryCampaignBot() {
     if (typeof Events !== "undefined") {
         var Trig = typeof Trigger !== "undefined" ? Trigger : (typeof Packages !== "undefined" ? Packages.mindustry.game.EventType.Trigger : null);
         if (Trig) Events.run(Trig.update, asRun(function () {
+            loopSafe("тик обновления", updateTick, null);
+        }));
+
+        function updateTick() {
             if (Time.time >= nextUiRefresh) {
                 nextUiRefresh = Time.time + 30;
                 refreshUi();
@@ -5016,7 +5117,7 @@ function installMindustryCampaignBot() {
             if (Time.time < bot.settleUntilTime) return;
 
             var u = Vars.player ? Vars.player.unit() : null;
-            var alive = !!(u && u.isValid() && !Vars.player.dead());
+            var alive = !!(unitAlive(u) && !playerDead(Vars.player));
             if (alive) {
                 var pl = u.plans.size > 0 ? u.buildPlan() : null;
                 var tx = pl ? pl.drawx() : (bot.hasTarget ? bot.targetX : null);
@@ -5035,64 +5136,71 @@ function installMindustryCampaignBot() {
             if (Time.time < bot.nextDecisionTime) return;
             bot.nextDecisionTime = Time.time + DECISION_INTERVAL_TICKS;
             thinkInSector(alive ? u : null);
-        }));
+        }
 
         if (typeof Timer !== "undefined" && Timer.schedule) {
             Timer.schedule(asRun(function () {
-                updateOutOfGame();
-                refreshUi();
+                loopSafe("вне игры", updateOutOfGame, null);
+                loopSafe("интерфейс", refreshUi, null);
             }), 2, 2);
         }
 
         var WLoad = typeof WorldLoadEvent !== "undefined" ? WorldLoadEvent : (typeof Packages !== "undefined" ? Packages.mindustry.game.EventType.WorldLoadEvent : null);
         if (WLoad) Events.on(WLoad, asCons(function () {
-            bot.ownPlans = [];
-            bot.rejectedSites = {};
-            bot.watchdog.reset();
-            bot.hasTarget = false;
-            bot.transferStage = 0;
-            bot.squadMode = SQUAD_RALLY;
-            bot.nextDecisionTime = 0;
-            bot.nextResearchTime = 0;
-            bot.capturedSinceSec = -1;
-            bot.settleUntilTime = Time.time + 90;
-            bot.transitionPending = false;
-            bot.pro.sectorKey = null;
-            bot.pro.prevHp = {};
+            loopSafe("загрузка мира", function () {
+                bot.ownPlans = [];
+                bot.rejectedSites = {};
+                bot.watchdog.reset();
+                bot.hasTarget = false;
+                bot.transferStage = 0;
+                bot.squadMode = SQUAD_RALLY;
+                bot.nextDecisionTime = 0;
+                bot.nextResearchTime = 0;
+                bot.capturedSinceSec = -1;
+                bot.settleUntilTime = Time.time + 90;
+                bot.transitionPending = false;
+                bot.pro.sectorKey = null;
+                bot.pro.prevHp = {};
+            }, null);
         }));
 
         if (typeof SectorCaptureEvent !== "undefined") {
             Events.on(SectorCaptureEvent, asCons(function (e) {
-                if (bot.state === BOT_RUNNING) {
-                    bot.capturedSinceSec = Time.time / 60;
-                    botLog("сектор захвачен ✅");
-                    runResearchPass();
-                    checkVictory();
-                }
+                loopSafe("захват сектора", function () {
+                    if (bot.state === BOT_RUNNING) {
+                        bot.capturedSinceSec = Time.time / 60;
+                        botLog("сектор захвачен ✅");
+                        runResearchPass();
+                        checkVictory();
+                    }
+                }, null);
             }));
         }
 
         if (typeof GameOverEvent !== "undefined") {
             Events.on(GameOverEvent, asCons(function () {
-                if (bot.state === BOT_RUNNING) {
+                loopSafe("проигрыш сектора", function () {
+                    if (bot.state !== BOT_RUNNING) return;
                     var lost = Vars.state ? Vars.state.getSector() : null;
                     if (lost) bot.sectorLosses[lost.id] = (bot.sectorLosses[lost.id] || 0) + 1;
                     var ls = lost ? bot.sectorLosses[lost.id] : 1;
-                    haltUnitActions();
+                    loopSafe("сброс действий юнита", haltUnitActions, null);
                     if (ls >= MAX_SECTOR_LOSSES) {
                         failBot("сектор потерян " + ls + " раза подряд");
                     } else {
                         bot.transitionPending = true;
                         if (typeof Timer !== "undefined" && Timer.schedule) {
                             Timer.schedule(asRun(function () {
-                                if (bot.state === BOT_RUNNING) {
-                                    bot.transitionPending = false;
-                                    launchNextSector(null);
-                                }
+                                loopSafe("переход после проигрыша", function () {
+                                    if (bot.state === BOT_RUNNING) {
+                                        bot.transitionPending = false;
+                                        launchNextSector(null);
+                                    }
+                                }, null);
                             }), 3.5);
                         }
                     }
-                }
+                }, null);
             }));
         }
 
@@ -5307,6 +5415,13 @@ if (typeof module !== "undefined" && module.exports) {
         findBusUnloaderCell: findBusUnloaderCell,
         applyCoreZones: applyCoreZones,
         kebabToCamel: kebabToCamel,
+        readMember: readMember,
+        unitDead: unitDead,
+        unitAlive: unitAlive,
+        unitFlying: unitFlying,
+        unitCommandable: unitCommandable,
+        playerDead: playerDead,
+        memberValid: memberValid,
         installMindustryCampaignBot: installMindustryCampaignBot
     };
 }

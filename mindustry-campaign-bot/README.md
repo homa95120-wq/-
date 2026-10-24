@@ -1,4 +1,4 @@
-# Serpulo Campaign Bot (`v2.0`)
+# Serpulo Campaign Bot (`v2.0.1`)
 
 Отдельный самостоятельный мод для **Mindustry v8** (build 154+ / `v160.7`), который **сам проходит кампанию Serpulo от Ground Zero до Planetary Launch Terminal** по честным игровым правилам — без читов, спавна ресурсов или обхода механик игры.
 
@@ -48,6 +48,17 @@
 - **Многоуровневая оборона и снабжение:** ориентированные к точкам спавна и базам врага укрепрайоны (стены от медных до кинетических, турели ПВО и наземного огня от `Duo`/`Scatter` до `Lancer`/`Salvo`/`Swarmer`, `Mender`/`Mend Projector`), доставка лучших доступных боеприпасов из ядра и расчёт выживаемости перед досрочным вызовом волны (`Vars.logic.skipWave()`).
 - **Производство армии и RTS-штурм вражеских баз:** постройка цепочек `Air / Ground / Naval Factory` + `Additive Reconstructor (T2)` + `Multiplicative Reconstructor (T3)`, автоматическое распределение `Mono` (добыча), `Poly` (стройка/восстановление) и `Mega` (ремонт), сбор ударного кулака на рубеже и штурм вражеских турелей и ядер в attack-секторах через `Call.commandUnits` + `UnitStance`.
 - **Защита от зависаний и сохранений:** состояние автокампании сохраняется в `Core.settings` (`scb-campaign-autopilot-enabled`), зависшие планы строительства помечаются в чёрный список клеток `Watchdog`-таймером, а при серии поражений на одном секторе бот безопасно переходит в режим `НУЖНА ПОМОЩЬ`, не сливая ресурсы.
+
+---
+
+## 🐞 v2.0.1 — исправление краша скриптовой версии
+
+В скриптовом движке Mindustry (Rhino) `Unit.dead` — это **поле типа boolean**, а не метод, поэтому вызовы `e.dead()` падали с ошибкой `TypeError: Cannot call property dead in object Unit#1816:flare ... it is "boolean"` и роняли игру прямо в бою:
+
+- `scriptmod/scripts/main.js` — **все** обращения к `dead` / `isFlying` / `isCommandable` / `isValid` / `Vars.player.dead` теперь идут через Rhino-безопасные хелперы `unitDead()`, `unitAlive()`, `unitFlying()`, `unitCommandable()`, `playerDead()` и `memberValid()`, которые читают член и как поле, и как метод (`readMember()`);
+- каждая стадия update-цикла обёрнута в `loopSafe()`: одно исключение логируется в `botLog()` **один раз** и шаг пропускается — игра и автокампания продолжаются;
+- в моках `test-logic.js` / `test-pro-sector.js` поле `dead` теперь **boolean**, как в реальной игре, и добавлен регрессионный тест: мёртвый юнит в `Groups.unit`, вражеский `flare` (поле `dead=false`, `isFlying=true`) рядом с ядром, `updateArmySquads` и `proUpdateHeat` не падают, мёртвые юниты исключаются из армии;
+- Java-версия не менялась по существу: в скомпилированном моде `Unit.dead()` — настоящий метод, и там этот риск отсутствует (проверено по коду `SectorAutopilot` / `ProRuntime` и зелёной сборке в CI).
 
 ---
 

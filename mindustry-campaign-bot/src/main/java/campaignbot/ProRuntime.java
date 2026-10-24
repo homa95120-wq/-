@@ -308,6 +308,8 @@ public class ProRuntime{
             fresh.put(key, hp);
             Float prev = prevHp.get(key);
             if(prev != null && hp < prev.floatValue() - 1f){
+                // Java mod: dead()/isFlying() are methods (Healthc / Unit). The Rhino ZIP edition uses
+                // the field-safe helpers unitDead()/unitFlying() in scriptmod/scripts/main.js.
                 boolean air = Units.closestEnemy(team, b.x, b.y, 14f * Vars.tilesize, e -> !e.dead() && e.isFlying()) != null;
                 heat.record(tileOf(b.x), tileOf(b.y), prev.floatValue() - hp, air);
             }

@@ -190,7 +190,9 @@ function ok(cond, msg) {
     for (let i = 0; i < 8; i++) {
         combatUnits.push({
             id: i + 1, team: 1, type: UnitTypes.dagger,
-            dead: () => false, isCommandable: () => true,
+            // Rhino exposes Unit.dead as a plain boolean FIELD, never as a method (v2.0 crash).
+            dead: false, health: 100, maxHealth: 100,
+            isCommandable: () => true, isFlying: () => false,
             command: () => ({ command: null, setStance() {} })
         });
     }
@@ -278,7 +280,9 @@ function ok(cond, msg) {
         control: { input: { isBuilding: false }, checkAutoUnlocks() {} },
         logic: { skipWave() {} },
         player: {
-            team: () => 1, closestCore: () => coreBuild, unit: () => playerUnit, dead: () => false,
+            team: () => 1, closestCore: () => coreBuild, unit: () => playerUnit,
+            dead: false, // boolean field in Rhino, not a method
+
             within: () => true
         },
         state: {
@@ -394,6 +398,38 @@ function ok(cond, msg) {
     ok(pro.brain.okCount >= 1 && sawGemma && gemmaPlan.priority === "BUILD_AMMO_BUS" && /Держу горлышко/.test(gemmaPlan.thought) && gemmaPlan.ammo === "graphite", "Gemma plan was applied through Core.app.post and then expired back to the planner");
     ok(!inst.journal.some(j => j.indexOf("отключён") >= 0), "no pro module crashed: " + inst.journal.join(" / "));
     ok(pro.brain.hudLine().indexOf("💭 Мысль:") === 0, "HUD thought line");
+
+    // ---- regression (v2.0.1 crash): in Rhino Unit.dead / Unit.health / Unit.isFlying are FIELDS.
+    // `e.dead()` threw `TypeError: Cannot call property dead ... it is "boolean"` and crashed the game.
+    // A corpse in Groups.unit must be skipped, an enemy flare (field-based) next to the core must be
+    // handled by both updateArmySquads and proUpdateHeat, and no update stage may fail.
+    combatUnits.push({
+        id: 9100, team: 1, type: UnitTypes.dagger,
+        dead: true, health: 0, maxHealth: 100, isFlying: false,
+        isCommandable: () => true,
+        command: () => ({ command: null, setStance() {} })
+    });
+    const enemyFlare = {
+        id: 9101, team: 2, type: UnitTypes.flare,
+        x: coreBuild.x + 100, y: coreBuild.y,
+        dead: false, health: 70, maxHealth: 70, isFlying: true
+    };
+    let proFilterCalls = 0;
+    global.Units.closestEnemy = (team, x, y, r, filter) => {
+        proFilterCalls++;
+        return (!filter || filter(enemyFlare)) ? enemyFlare : null;
+    };
+    const errsBefore = inst.loopErrors;
+    let threw = null;
+    for (let cycle = 0; cycle < 3; cycle++) {
+        global.Time.time += 200;
+        try { inst.thinkInSector(playerUnit); } catch (e) { threw = e; }
+        while (!playerUnit.plans.isEmpty()) playerUnit.plans.remove(playerUnit.plans.first());
+    }
+    ok(!threw, "thinkInSector does not throw on boolean `dead` fields: " + threw);
+    ok(inst.loopErrors === errsBefore, "no update stage failed: " + inst.journal.join(" / "));
+    ok(proFilterCalls > 0, "Units.closestEnemy predicates were evaluated");
+    ok(inst.pro.armyCount === 8, "dead unit excluded from the pro army (" + inst.pro.armyCount + ")");
 }
 
 console.log(`test-pro-sector.js OK: ${checks} assertions passed.`);

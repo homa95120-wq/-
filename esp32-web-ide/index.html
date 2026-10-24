@@ -18,6 +18,7 @@
       </div>
       <div class="tb-center" id="tb-title">ESP32 Studio</div>
       <div class="tb-right">
+        <button class="tbtn" id="btn-update" title="Проверить и скачать обновление из GitHub Releases (esp32-studio-latest)">⬇ Обновить с GitHub</button>
         <button class="tbtn" id="btn-run" title="Запустить текущий файл на плате (F5)">▶</button>
         <button class="tbtn" id="btn-stop" title="Остановить (Ctrl+C на плате)">■</button>
         <button class="tbtn" id="btn-upload" title="Загрузить текущий файл на плату (Ctrl+U)">⬆</button>
@@ -70,14 +71,14 @@
             <div class="section-head">
               <span class="chev">▾</span><span id="dev-root">/</span>
               <span class="actions">
-                <button title="Обновить" id="btn-devrefresh">⟳</button>
+                <button title="Проверить REPL и обновить список" id="btn-devrefresh">⟳</button>
                 <button title="Загрузить все файлы проекта" id="btn-uploadall">⬆⬆</button>
               </span>
             </div>
             <ul class="tree" id="tree-device"><li class="muted">Подключи плату</li></ul>
           </div>
           <div class="section">
-            <div class="section-head"><span class="chev">▾</span><span>ИНФО</span></div>
+            <div class="section-head"><span class="chev">▾</span><span>ИНФО И ДИАГНОСТИКА</span></div>
             <div class="info" id="dev-info">—</div>
           </div>
         </div>
@@ -86,12 +87,13 @@
           <div class="view-title">ПРОШИВКА MICROPYTHON</div>
           <div class="pad">
             <p class="hint">Если на плате ещё нет MicroPython — прошей его здесь. Скачай .bin для своей платы с
-              <a href="https://micropython.org/download/?port=esp32" target="_blank">micropython.org</a>
+              <a href="https://micropython.org/download/?port=esp32" target="_blank" rel="noopener noreferrer">micropython.org</a>
               (для ESP32-S3 N16R8 — вариант <b>ESP32_GENERIC_S3-SPIRAM_OCT</b>, 8 МБ Octal PSRAM).</p>
-            <p class="hint">N16R8: подключи кабель к COM, адрес <b>0x0</b> (или авто). При ошибках попробуй 115200. Стирание удаляет все файлы на плате.</p>
+            <p class="hint">N16R8: для прошивки используй разъём <b>COM</b> (CH343), адрес <b>0x0</b> (или авто). После прошивки REPL может отвечать как на <b>COM</b>, так и на втором разъёме <b>USB</b> (встроенный USB Espressif).</p>
             <label class="field">Файл прошивки (.bin)
               <input type="file" id="fw-file" accept=".bin" />
             </label>
+            <div class="file-meta muted" id="fw-file-info">Файл .bin не выбран</div>
             <label class="field">Адрес записи
               <select id="fw-offset">
                 <option value="auto">авто (по чипу)</option>
@@ -99,7 +101,8 @@
                 <option value="0x1000">0x1000 — классический ESP32</option>
               </select>
             </label>
-            <label class="field"><input type="checkbox" id="fw-erase" checked /> Стереть флеш перед записью</label>
+            <label class="field"><input type="checkbox" id="fw-erase" /> Стереть флеш перед записью</label>
+            <p class="hint small warn-text">⚠ Внимание: стирание флеш безвозвратно удаляет все файлы (main.py и др.) и данные на плате. Не включай повторное стирание без необходимости.</p>
             <label class="field">Скорость
               <select id="fw-baud">
                 <option value="460800">460800</option>
@@ -110,7 +113,7 @@
             <button class="btn" id="btn-flash">⚡ Прошить</button>
             <button class="btn danger" id="btn-erase">Стереть флеш полностью</button>
             <div class="progress"><div id="fw-bar"></div></div>
-            <div class="info" id="fw-status">Готов</div>
+            <div class="info fw-log" id="fw-status">Готов</div>
             <p class="hint small">Если плата не входит в режим загрузки: зажми BOOT, нажми RESET, отпусти BOOT, затем жми «Прошить».</p>
           </div>
         </div>
@@ -133,6 +136,10 @@
             <label class="field"><input type="checkbox" id="set-wrap" /> Перенос строк</label>
             <label class="field"><input type="checkbox" id="set-autosave" checked /> Автосохранение проекта в браузере</label>
             <button class="btn danger" id="btn-wipe">Очистить проект</button>
+            <hr class="sep-line" />
+            <div class="field"><b>Сборка и обновления</b></div>
+            <div class="info" id="set-build-info">—</div>
+            <button class="btn" id="btn-settings-update">⬇ Обновить с GitHub</button>
           </div>
         </div>
       </div>
@@ -147,12 +154,12 @@
         <div id="welcome">
           <div class="w-logo">ESP32</div>
           <h2>ESP32 Studio</h2>
-          <p>Редактор в стиле VS Code для программирования ESP32 на MicroPython прямо из браузера.</p>
+          <p>Редактор в стиле VS Code для программирования ESP32 на MicroPython прямо из браузера или десктоп-приложения.</p>
           <ul>
-            <li><b>⚡ Подключить</b> — выбери USB-порт платы (нужен Chrome / Edge / Opera)</li>
-            <li><b>▶ F5</b> — запустить открытый файл на плате</li>
+            <li><b>⚡ Подключить</b> — выбери USB-порт платы (COM / USB)</li>
+            <li><b>▶ F5</b> — запустить открытый файл на плате (после ответа raw REPL)</li>
             <li><b>⬆ Ctrl+U</b> — сохранить файл на плату (main.py запустится при включении)</li>
-            <li><b>Ctrl+Shift+P</b> — палитра команд</li>
+            <li><b>⬇ Обновить с GitHub</b> — проверить свежую сборку в релизе <code>esp32-studio-latest</code></li>
           </ul>
           <p class="muted">Нет MicroPython на плате? Вкладка ⚡ слева — прошивка за минуту.</p>
         </div>
@@ -160,7 +167,7 @@
         <div id="panel">
           <div class="panel-tabs">
             <span class="ptab active" data-panel="terminal">ТЕРМИНАЛ (REPL)</span>
-            <span class="ptab" data-panel="output">ВЫВОД</span>
+            <span class="ptab" data-panel="output">ВЫВОД / ДИАГНОСТИКА</span>
             <span class="actions">
               <button id="btn-term-clear" title="Очистить">🗑</button>
               <button id="btn-panel-toggle" title="Свернуть/развернуть">⌄</button>
@@ -173,15 +180,50 @@
     </div>
 
     <!-- Status bar -->
-    <div id="statusbar">
+    <div id="statusbar" class="disconnected">
       <span class="sb-item sb-remote" id="sb-conn">⚡ Не подключено</span>
       <span class="sb-item" id="sb-chip"></span>
       <span class="sb-item" id="sb-msg"></span>
       <span class="spacer"></span>
+      <span class="sb-item" id="sb-build" title="Текущая сборка ESP32 Studio (нажми для проверки обновлений)"></span>
       <span class="sb-item" id="sb-pos">Стр 1, Стлб 1</span>
       <span class="sb-item">UTF-8</span>
       <span class="sb-item" id="sb-lang">Python</span>
       <span class="sb-item" id="sb-baud">115200</span>
+    </div>
+  </div>
+
+  <!-- Update modal -->
+  <div id="update-modal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="update-modal-title">
+    <div class="modal-box">
+      <div class="modal-head">
+        <span id="update-modal-title">Обновление ESP32 Studio с GitHub</span>
+        <button class="modal-close" id="btn-update-close" title="Закрыть">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="update-row">
+          <div class="update-label">Текущая сборка:</div>
+          <div class="update-val" id="upd-local">—</div>
+        </div>
+        <div class="update-row">
+          <div class="update-label">Официальный релиз (<code>esp32-studio-latest</code>):</div>
+          <div class="update-val" id="upd-remote">Проверка…</div>
+        </div>
+        <div class="update-status" id="upd-status">Проверяю официальный GitHub Release…</div>
+        <div class="update-actions" id="upd-actions">
+          <button class="btn" id="btn-update-download" disabled>⬇ Скачать обновление</button>
+          <button class="btn secondary hidden" id="btn-update-alt"></button>
+        </div>
+        <p class="hint small" id="upd-note">
+          Автоматическая установка не используется: кнопка «Скачать обновление» загружает официальный файл Windows (.exe) из GitHub Releases. После скачивания закрой ESP32 Studio и запусти полученный файл.
+        </p>
+      </div>
+      <div class="modal-foot">
+        <button class="tbtn" id="btn-update-retry">🔄 Проверить снова</button>
+        <button class="tbtn" id="btn-update-page">🌐 Открыть страницу релиза</button>
+        <span class="spacer"></span>
+        <button class="tbtn" id="btn-update-cancel">Закрыть</button>
+      </div>
     </div>
   </div>
 

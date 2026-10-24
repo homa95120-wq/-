@@ -6,6 +6,13 @@ import { FitAddon } from '@xterm/addon-fit';
 import { Device } from './device.js';
 import { flashFirmware } from './flasher.js';
 import { EXAMPLES } from './examples.js';
+import {
+  checkGitHubUpdate,
+  getLocalBuildInfo,
+  formatBuildDate,
+  isSafeReleaseUrl,
+  RELEASE_PAGE_URL,
+} from './updater.js';
 
 self.MonacoEnvironment = {
   getWorker: () => new Worker(new URL('monaco-editor/editor/editor.worker.start.js', import.meta.url), { type: 'module' }),
@@ -13,6 +20,114 @@ self.MonacoEnvironment = {
 
 const $ = (s) => document.querySelector(s);
 const $$ = (s) => [...document.querySelectorAll(s)];
+
+// ============================================================
+//  Сведения о текущей сборке и обновления с GitHub
+// ============================================================
+const localBuild = getLocalBuildInfo();
+const runtimeEnv = window.esp32studio || { desktop: false, platform: 'web', portable: false };
+
+function describeLocalBuild() {
+  const mode = runtimeEnv.desktop
+    ? (runtimeEnv.portable ? 'Windows Portable' : `Desktop (${runtimeEnv.platform})`)
+    : 'Веб-версия';
+  const dateStr = localBuild.builtAt ? formatBuildDate(localBuild.builtAt) : 'дата неизвестна';
+  return `v${localBuild.version} · сборка ${localBuild.shortCommit} (${dateStr}) · ${mode}`;
+}
+
+$('#sb-build').textContent = `v${localBuild.version} (${localBuild.shortCommit})`;
+$('#set-build-info').textContent =
+  `Версия: ${localBuild.version}\n` +
+  `Сборка (коммит): ${localBuild.shortCommit}\n` +
+  `Дата сборки: ${formatBuildDate(localBuild.builtAt)}\n` +
+  `Канал: ${localBuild.releaseTag}`;
+
+function openSafeExternal(url) {
+  if (!isSafeReleaseUrl(url)) {
+    toast('Заблокирована ссылка вне официального GitHub Release', 'err');
+    return;
+  }
+  window.open(url, '_blank', 'noopener,noreferrer');
+}
+
+async function openUpdateModal() {
+  const modal = $('#update-modal');
+  const elLocal = $('#upd-local');
+  const elRemote = $('#upd-remote');
+  const elStatus = $('#upd-status');
+  const btnPrimary = $('#btn-update-download');
+  const btnAlt = $('#btn-update-alt');
+
+  modal.classList.remove('hidden');
+  elLocal.textContent = describeLocalBuild();
+  elRemote.textContent = 'Проверяю релиз esp32-studio-latest на GitHub…';
+  elStatus.className = 'update-status';
+  elStatus.textContent = 'Запрашиваю метаданные официального релиза esp32-studio-latest…';
+  btnPrimary.disabled = true;
+  btnPrimary.textContent = '⬇ Скачать обновление';
+  btnPrimary.onclick = null;
+  btnAlt.classList.add('hidden');
+  btnAlt.onclick = null;
+
+  try {
+    const res = await checkGitHubUpdate({
+      localBuild,
+      portable: Boolean(runtimeEnv.portable),
+    });
+    const remoteCommitStr = res.remote.shortCommit ? `сборка ${res.remote.shortCommit}` : 'коммит не указан в метаданных';
+    const remoteDateStr = res.remote.updatedAt ? `обновлён ${formatBuildDate(res.remote.updatedAt)}` : 'дата не указана';
+    elRemote.textContent = `v${res.remote.version} · ${remoteCommitStr} · ${remoteDateStr}`;
+
+    if (res.hasUpdate) {
+      elStatus.className = 'update-status has-update';
+      elStatus.textContent = `Доступна новая сборка! ${res.summary}`;
+    } else {
+      elStatus.className = 'update-status up-to-date';
+      elStatus.textContent = `Обновление не требуется: ${res.summary} При необходимости файл можно скачать повторно.`;
+    }
+
+    const { primary, secondary } = res.downloads;
+    if (primary) {
+      const sizeMb = primary.size ? ` (${(primary.size / 1048576).toFixed(1)} МБ)` : '';
+      btnPrimary.disabled = false;
+      btnPrimary.textContent = `⬇ Скачать обновление: ${primary.name}${sizeMb}`;
+      btnPrimary.onclick = () => openSafeExternal(primary.url);
+    } else {
+      btnPrimary.disabled = false;
+      btnPrimary.textContent = '⬇ Скачать обновление со страницы релиза';
+      btnPrimary.onclick = () => openSafeExternal(res.remote.pageUrl || RELEASE_PAGE_URL);
+    }
+
+    if (secondary) {
+      const altKind = /portable/i.test(secondary.name) ? 'Portable-версию (.exe без установки)' : 'установщик Setup (.exe)';
+      btnAlt.textContent = `Скачать ${altKind}: ${secondary.name}`;
+      btnAlt.classList.remove('hidden');
+      btnAlt.onclick = () => openSafeExternal(secondary.url);
+    }
+  } catch (err) {
+    elRemote.textContent = 'Не удалось получить данные о релизе';
+    elStatus.className = 'update-status error';
+    elStatus.textContent = err.message || 'Ошибка при проверке обновлений на GitHub.';
+    btnPrimary.disabled = false;
+    btnPrimary.textContent = '🌐 Открыть страницу релиза GitHub вручную';
+    btnPrimary.onclick = () => openSafeExternal(RELEASE_PAGE_URL);
+  }
+}
+
+function closeUpdateModal() {
+  $('#update-modal').classList.add('hidden');
+}
+
+$('#btn-update').onclick = openUpdateModal;
+$('#btn-settings-update').onclick = openUpdateModal;
+$('#sb-build').onclick = openUpdateModal;
+$('#btn-update-close').onclick = closeUpdateModal;
+$('#btn-update-cancel').onclick = closeUpdateModal;
+$('#btn-update-retry').onclick = openUpdateModal;
+$('#btn-update-page').onclick = () => openSafeExternal(RELEASE_PAGE_URL);
+$('#update-modal').addEventListener('mousedown', (e) => {
+  if (e.target === $('#update-modal')) closeUpdateModal();
+});
 
 // ============================================================
 //  Состояние проекта (хранится в localStorage)
@@ -129,46 +244,193 @@ new ResizeObserver(() => { try { fit.fit(); } catch {} }).observe($('#terminal')
 term.writeln('\x1b[90mESP32 Studio — терминал REPL. Нажми «⚡ Подключить», чтобы начать.\x1b[0m');
 
 // ============================================================
-//  Устройство
+//  Устройство, статусы подключения и диагностика REPL
 // ============================================================
 const dev = new Device();
+let isFlashing = false;
+let connState = 'disconnected';
+
+const lastFlashRecord = {
+  fileName: '',
+  fileSize: 0,
+  offset: 'auto',
+  baud: 460800,
+  erase: false,
+  status: 'не выполнялась в этой сессии',
+  logTail: '',
+};
+
+/**
+ * Устанавливает честный статус подключения:
+ * - disconnected: «⚡ Не подключено»
+ * - flashing:     «⚡ Идёт прошивка»
+ * - port-open:    «🔌 COM открыт» (порт открыт, ответ MicroPython ещё проверяется)
+ * - repl-ready:   «⚡ MicroPython готов» (получен ответ от REPL)
+ * - no-repl:      «⚠ Нет ответа REPL (COM открыт)»
+ */
+function setConnState(state) {
+  connState = state;
+  const sbConn = $('#sb-conn');
+  const btnConn = $('#btn-connect');
+  const sb = $('#statusbar');
+
+  btnConn.classList.remove('connected', 'port-open', 'no-repl');
+  sb.classList.remove('disconnected', 'flashing', 'port-open', 'no-repl', 'repl-ready');
+
+  if (state === 'flashing') {
+    sbConn.textContent = '⚡ Идёт прошивка';
+    btnConn.textContent = '⚡ Идёт прошивка…';
+    btnConn.title = 'Выполняется прошивка платы через загрузчик';
+    btnConn.disabled = true;
+    sb.classList.add('flashing');
+    return;
+  }
+
+  btnConn.disabled = !Device.supported;
+
+  if (state === 'port-open') {
+    sbConn.textContent = '🔌 COM открыт';
+    btnConn.textContent = '⏏ Закрыть COM';
+    btnConn.title = 'COM-порт открыт, проверяется ответ MicroPython REPL. Нажми, чтобы закрыть COM-порт';
+    btnConn.classList.add('port-open');
+    sb.classList.add('port-open');
+    return;
+  }
+
+  if (state === 'repl-ready') {
+    sbConn.textContent = '⚡ MicroPython готов';
+    btnConn.textContent = '⏏ Отключить';
+    btnConn.title = 'MicroPython REPL готов. Нажми, чтобы отключить плату';
+    btnConn.classList.add('connected');
+    sb.classList.add('repl-ready');
+    return;
+  }
+
+  if (state === 'no-repl') {
+    sbConn.textContent = '⚠ Нет ответа REPL (COM открыт)';
+    btnConn.textContent = '⏏ Закрыть COM';
+    btnConn.title = 'Открыт только COM-порт, MicroPython REPL не ответил. Нажми, чтобы закрыть порт';
+    btnConn.classList.add('no-repl');
+    sb.classList.add('no-repl');
+    return;
+  }
+
+  sbConn.textContent = '⚡ Не подключено';
+  btnConn.textContent = '⚡ Подключить';
+  btnConn.title = 'Подключить плату по USB';
+  sb.classList.add('disconnected');
+}
+
+// Панель подсказки и диагностики при отсутствии ответа REPL
 const replHint = document.createElement('div');
 replHint.hidden = true;
-replHint.style.cssText = 'position:fixed;bottom:30px;left:65px;right:20px;z-index:900;padding:12px;background:#513d16;color:#fff;border:1px solid #b58a30';
-replHint.append(document.createTextNode('Порт открыт, но MicroPython не отвечает. Если он не установлен — прошей MicroPython. Иначе проверь скорость, нажми RESET или попробуй разъём USB: REPL прошивки S3 может работать через встроенный USB. '));
-const flashHintButton = document.createElement('button');
-flashHintButton.className = 'btn';
-flashHintButton.textContent = '⚡ Перейти к прошивке';
-flashHintButton.onclick = () => { replHint.hidden = true; showView('flash'); };
-replHint.append(flashHintButton);
+replHint.style.cssText = 'position:fixed;bottom:28px;left:56px;right:16px;z-index:900;padding:12px 14px;background:#3d2e10;color:#fff;border:1px solid #b58a30;border-radius:4px;box-shadow:0 4px 16px rgba(0,0,0,.5);line-height:1.45';
+const replHintText = document.createElement('div');
+replHintText.style.marginBottom = '8px';
+const replHintBtns = document.createElement('div');
+replHintBtns.style.cssText = 'display:flex;flex-wrap:wrap;gap:8px;align-items:center';
+
+function makeHintBtn(label, onClick, secondary = false) {
+  const b = document.createElement('button');
+  b.className = secondary ? 'btn secondary' : 'btn';
+  b.style.cssText = 'width:auto;margin:0;padding:5px 10px;font-size:12px;display:inline-block';
+  b.textContent = label;
+  b.onclick = onClick;
+  return b;
+}
+
+replHintBtns.append(
+  makeHintBtn('🔄 Проверить REPL снова', () => refreshDevice()),
+  makeHintBtn('🔌 Сменить порт (USB / COM)', async () => {
+    replHint.hidden = true;
+    if (dev.connected) await dev.disconnect();
+    await toggleConnect();
+  }, true),
+  makeHintBtn('📋 Диагностика и журнал', () => showDiagnosticReport(), true),
+  makeHintBtn('⚡ К прошивке', () => { replHint.hidden = true; showView('flash'); }, true),
+  makeHintBtn('Скрыть', () => { replHint.hidden = true; }, true),
+);
+replHint.append(replHintText, replHintBtns);
 document.body.append(replHint);
+
+function updateReplHint(diag) {
+  const summary = diag?.summary ||
+    'COM-порт открыт, но MicroPython REPL не ответил. Отсутствие ответа на COM-порту НЕ доказывает отсутствие MicroPython.';
+  replHintText.textContent =
+    `${summary} ` +
+    'Что проверить на ESP32-S3 N16R8: (1) нажми кнопку RESET на плате и «Проверить REPL снова»; ' +
+    '(2) переставь кабель в разъём USB (встроенный USB Espressif, VID 303A) — на S3 загрузчик работает на COM/CH343, а REPL часто на USB; ' +
+    '(3) проверь полное имя .bin и последние строки журнала прошивки. ' +
+    '⚠ Не включай повторное стирание флеш без необходимости — оно удалит все данные на плате.';
+  replHint.hidden = false;
+}
+
+function showDiagnosticReport() {
+  const out = $('#output');
+  const selectedFile = $('#fw-file')?.files?.[0];
+  const binName = selectedFile ? `${selectedFile.name} (${selectedFile.size} байт)` : (lastFlashRecord.fileName || 'не выбран в текущей сессии (сообщи полное имя .bin)');
+  const rxTail = dev.lastRx ? dev.lastRx.trim().slice(-600) : '(от платы не поступило ни одного байта после открытия порта)';
+  const fwTail = lastFlashRecord.logTail || ($('#fw-status')?.textContent || 'Готов').trim().split('\n').slice(-10).join('\n');
+
+  out.textContent =
+    '=== ДИАГНОСТИКА ПОДКЛЮЧЕНИЯ И ТАЙМАУТА REPL (ESP32-S3 N16R8) ===\n\n' +
+    `Статус подключения: ${$('#sb-conn').textContent}\n` +
+    `Скорость REPL: ${settings.baud} бод\n` +
+    `Файл прошивки (.bin): ${binName}\n` +
+    `Параметры последней прошивки: адрес=${lastFlashRecord.offset}, скорость=${lastFlashRecord.baud}, стирание=${lastFlashRecord.erase ? 'да' : 'нет'}, итог=${lastFlashRecord.status}\n\n` +
+    '--- Последние строки журнала прошивки ---\n' +
+    `${fwTail}\n\n` +
+    '--- Последние принятые данные из открытого COM-порта ---\n' +
+    `${rxTail}\n\n` +
+    '--- Что проверить и сообщить для диагностики ---\n' +
+    '1. Полное имя выбранного файла .bin (для ESP32-S3 N16R8 с 8 МБ Octal PSRAM нужен ESP32_GENERIC_S3-SPIRAM_OCT-*.bin, адрес 0x0).\n' +
+    '2. Последние строки журнала прошивки: есть ли подтверждение «✓ Запись завершена успешно, перезагружаю плату…».\n' +
+    '3. Повторяется ли в терминале строка «image at 0x10000 has invalid magic byte» при нажатии кнопки RESET на плате.\n' +
+    '4. Разъём USB vs COM: на ESP32-S3 с двумя USB-C разъём COM (CH343, VID 1A86) всегда работает для загрузчика,\n' +
+    '   но REPL MicroPython может отвечать на втором разъёме — USB (Espressif USB-CDC, VID 303A).\n' +
+    '5. ⚠ Внимание: не запускай повторное стирание флеш без необходимости — стирание удаляет все файлы и данные на плате.\n';
+  showPanel('output');
+}
+
 dev.onData = (s) => term.write(s);
 term.onData((d) => { if (dev.connected && !dev.busy) dev.write(d).catch(() => {}); });
 
 dev.addEventListener('connect', () => {
-  $('#btn-connect').textContent = '⏏ Отключить';
-  $('#btn-connect').classList.add('connected');
-  $('#sb-conn').textContent = '⚡ Подключено';
-  $('#statusbar').classList.remove('disconnected');
-  toast('COM-порт открыт. Проверяю MicroPython…', 'ok');
-  term.writeln('\r\n[COM-порт открыт; проверка MicroPython…]');
+  setConnState('port-open');
+  $('#dev-info').textContent = 'COM-порт открыт.\nПроверяю ответ MicroPython REPL…';
+  toast('COM-порт открыт. Проверяю ответ MicroPython REPL…', 'ok');
+  term.writeln('\r\n[COM-порт открыт; ожидание ответа MicroPython REPL…]');
   setTimeout(refreshDevice, 600);
+});
+dev.addEventListener('repl-ready', () => {
+  if (!isFlashing && dev.connected) {
+    replHint.hidden = true;
+    setConnState('repl-ready');
+  }
+});
+dev.addEventListener('repl-timeout', (ev) => {
+  if (!isFlashing && dev.connected) {
+    setConnState('no-repl');
+    updateReplHint(ev.detail);
+  }
 });
 dev.addEventListener('disconnect', () => {
   replHint.hidden = true;
-  $('#btn-connect').textContent = '⚡ Подключить';
-  $('#btn-connect').classList.remove('connected');
-  $('#sb-conn').textContent = '⚡ Не подключено';
+  if (isFlashing) {
+    setConnState('flashing');
+    return;
+  }
+  setConnState('disconnected');
   $('#sb-chip').textContent = '';
-  $('#statusbar').classList.add('disconnected');
   $('#tree-device').innerHTML = '<li class="muted">Подключи плату</li>';
   $('#dev-info').textContent = '—';
-  term.writeln('\r\n\x1b[90m[отключено]\x1b[0m');
+  term.writeln('\r\n\x1b[90m[COM-порт закрыт]\x1b[0m');
 });
 dev.addEventListener('run-end', () => status('Выполнение завершено'));
-$('#statusbar').classList.add('disconnected');
+setConnState('disconnected');
 
 async function toggleConnect() {
+  if (isFlashing) return;
   if (dev.connected) { await dev.disconnect(); return; }
   try {
     await dev.connect(settings.baud);
@@ -183,21 +445,29 @@ async function toggleConnect() {
 }
 
 async function refreshDevice() {
-  if (!dev.connected || dev.busy) return;
+  if (!dev.connected || dev.busy || isFlashing) return;
+  status('Проверка связи с MicroPython REPL…');
   try {
     const info = await dev.info();
     replHint.hidden = true;
-    $('#sb-conn').textContent = '⚡ MicroPython';
+    setConnState('repl-ready');
+    status('MicroPython готов');
     $('#sb-chip').textContent = `${info.machine.split(' with ')[1] || info.platform} · ${info.version}`;
     $('#dev-info').textContent =
+      `Статус: MicroPython готов\n` +
       `${info.machine}\nMicroPython ${info.version}\nCPU: ${(info.freq / 1e6) | 0} МГц\n` +
       `Флеш: ${kb(info.fs_free)} свободно из ${kb(info.fs_total)}\nRAM свободно: ${kb(info.mem_free)}`;
     await listDevice();
   } catch (e) {
-    if (!dev.connected) return;
-    replHint.hidden = false;
-    $('#sb-conn').textContent = '⚠ COM открыт, нет ответа REPL';
-    $('#dev-info').textContent = 'Нет ответа от MicroPython.\nЕсли на плате другая прошивка —\nпрошей MicroPython во вкладке ⚡.';
+    if (!dev.connected || isFlashing) return;
+    setConnState('no-repl');
+    status('Нет ответа REPL (COM открыт)');
+    const diag = e.diagnostic || dev.lastDiagnostic;
+    updateReplHint(diag);
+    $('#dev-info').textContent =
+      'Статус: COM открыт, нет ответа REPL.\n' +
+      (diag?.summary || 'Плата не ответила на запрос raw REPL.') + '\n\n' +
+      'Нажми RESET на плате или проверь второй разъём USB (встроенный USB S3).';
     term.writeln(`\r\n\x1b[33m${e.message}\x1b[0m`);
   }
 }
@@ -256,9 +526,25 @@ async function downloadToProject(path, name) {
   persist(); renderTree(); toast(`${name} скопирован в проект`, 'ok');
 }
 async function runDeviceFile(path) {
+  if (!needDev()) return;
+  showPanel('terminal');
+  status(`⏳ Ожидание ответа raw REPL для запуска ${path}…`);
   try {
-    await dev.exec(`exec(open(${JSON.stringify(path)}).read())`, 1000).catch(() => {});
-  } catch {}
+    await dev.run(`exec(open(${JSON.stringify(path)}).read())`, () => {
+      replHint.hidden = true;
+      setConnState('repl-ready');
+      status('▶ Выполняю ' + path);
+      term.writeln(`\r\n\x1b[32m▶ ${path}\x1b[0m`);
+    });
+  } catch (e) {
+    if (dev.connected && !dev.replReady) {
+      setConnState('no-repl');
+      updateReplHint(e.diagnostic || dev.lastDiagnostic);
+    }
+    status('⚠ Запуск не выполнен: нет ответа REPL');
+    term.writeln(`\r\n\x1b[33m[Не удалось запустить ${path}: ${e.message}]\x1b[0m`);
+    toast(e.message, 'err');
+  }
 }
 async function deleteDeviceFile(path) {
   if (!confirm(`Удалить ${path} с платы?`)) return;
@@ -414,17 +700,34 @@ function openLocal() {
 // ============================================================
 //  Действия с платой
 // ============================================================
-function needDev() { if (!dev.connected) { toast('Сначала подключи плату (⚡)', 'err'); return false; } return true; }
+function needDev() {
+  if (isFlashing) { toast('Дождись завершения прошивки', 'err'); return false; }
+  if (!dev.connected) { toast('Сначала подключи плату (⚡)', 'err'); return false; }
+  return true;
+}
 function currentCode() { return editor.getModel()?.getValue() ?? ''; }
 
 async function runCurrent() {
   if (!needDev() || !project.active) return;
+  const fileName = displayName(project.active);
   showPanel('terminal');
+  status(`⏳ Ожидание ответа raw REPL для запуска ${fileName}…`);
   try {
-    status('▶ Выполняю ' + displayName(project.active));
-    term.writeln(`\r\n\x1b[32m▶ ${displayName(project.active)}\x1b[0m`);
-    await dev.run(currentCode());
-  } catch (e) { toast(e.message, 'err'); status(''); }
+    await dev.run(currentCode(), () => {
+      replHint.hidden = true;
+      setConnState('repl-ready');
+      status('▶ Выполняю ' + fileName);
+      term.writeln(`\r\n\x1b[32m▶ ${fileName}\x1b[0m`);
+    });
+  } catch (e) {
+    if (dev.connected && !dev.replReady) {
+      setConnState('no-repl');
+      updateReplHint(e.diagnostic || dev.lastDiagnostic);
+    }
+    status('⚠ Запуск не выполнен: нет ответа REPL');
+    term.writeln(`\r\n\x1b[33m[Запуск ${fileName} не выполнен: ${e.message}]\x1b[0m`);
+    toast(e.message, 'err');
+  }
 }
 async function stopRun() { if (!needDev()) return; await dev.stop(); status('■ Остановлено'); }
 async function softReset() { if (!needDev()) return; await dev.softReset(); status('⟳ Сброс'); setTimeout(refreshDevice, 1500); }
@@ -460,35 +763,110 @@ async function uploadAll() {
 // ============================================================
 //  Прошивка
 // ============================================================
+function kb(n) { return n < 1024 ? n + ' Б' : (n / 1024).toFixed(1) + ' КБ'; }
+
+$('#fw-file').onchange = () => {
+  const f = $('#fw-file').files?.[0];
+  const infoEl = $('#fw-file-info');
+  if (!f) {
+    infoEl.textContent = 'Файл .bin не выбран';
+    return;
+  }
+  infoEl.textContent = `Выбран: ${f.name} (${kb(f.size)}, ${f.size} байт)`;
+};
+
 async function doFlash(eraseOnly = false) {
+  if (isFlashing) return;
   const file = $('#fw-file').files[0];
   if (!eraseOnly && !file) return toast('Выбери .bin файл прошивки', 'err');
-  const log = $('#fw-status'); const bar = $('#fw-bar');
-  log.textContent = ''; bar.style.width = '0';
+  const eraseChecked = eraseOnly || $('#fw-erase').checked;
+  if (!eraseOnly && eraseChecked) {
+    const ok = confirm(
+      'Включена опция «Стереть флеш перед записью».\n' +
+      'Это безвозвратно удалит все файлы (main.py и др.) и сохранённые данные на плате.\n\n' +
+      'Продолжить прошивку со стиранием?'
+    );
+    if (!ok) return;
+  }
+
+  const log = $('#fw-status');
+  const bar = $('#fw-bar');
+  const out = $('#output');
+  log.textContent = '';
+  out.textContent = '=== ЖУРНАЛ ПРОШИВКИ ===\n';
+  bar.style.width = '0';
   $('#btn-flash').disabled = $('#btn-erase').disabled = true;
+
+  const off = $('#fw-offset').value;
+  const baud = +$('#fw-baud').value;
+  lastFlashRecord.fileName = eraseOnly ? '(только стирание)' : `${file.name} (${file.size} байт)`;
+  lastFlashRecord.fileSize = eraseOnly ? 0 : file.size;
+  lastFlashRecord.offset = off;
+  lastFlashRecord.baud = baud;
+  lastFlashRecord.erase = eraseChecked;
+  lastFlashRecord.status = 'идёт прошивка…';
+  lastFlashRecord.logTail = '';
+
+  const appendFlashLog = (s) => {
+    log.textContent += s;
+    log.scrollTop = log.scrollHeight;
+    out.textContent += s;
+    out.scrollTop = out.scrollHeight;
+    lastFlashRecord.logTail = log.textContent.trim().split('\n').slice(-10).join('\n');
+  };
+
+  let port = null;
   try {
-    let port;
-    if (dev.connected) { port = await dev.release(); }
-    else port = await navigator.serial.requestPort();
+    isFlashing = true;
+    replHint.hidden = true;
+    setConnState('flashing');
+    status('Идёт прошивка…');
+
+    if (dev.connected) {
+      port = await dev.release();
+      setConnState('flashing');
+    } else {
+      port = await navigator.serial.requestPort();
+      setConnState('flashing');
+    }
+
     const data = eraseOnly ? null : new Uint8Array(await file.arrayBuffer());
-    const off = $('#fw-offset').value;
     const chip = await flashFirmware(port, {
       data,
+      fileName: file?.name || '',
       offset: off === 'auto' ? 'auto' : parseInt(off, 16),
-      erase: $('#fw-erase').checked,
-      baud: +$('#fw-baud').value,
-      log: (s) => { log.textContent += s; log.scrollTop = log.scrollHeight; },
-      progress: (p) => { bar.style.width = (p * 100) + '%'; },
+      erase: eraseChecked,
+      baud,
+      log: appendFlashLog,
+      progress: (p) => {
+        const pct = Math.round(p * 100);
+        bar.style.width = pct + '%';
+        status(`Идёт прошивка… ${pct}%`);
+      },
     });
     bar.style.width = '100%';
+    lastFlashRecord.status = `успешно (${chip})`;
+    status('Прошивка завершена, переподключаю порт…');
     toast(eraseOnly ? 'Флеш стёрт' : `MicroPython прошит на ${chip}`, 'ok');
     await new Promise(r => setTimeout(r, 1500));
+    isFlashing = false;
     await dev.open(port, settings.baud);
     showView('device');
   } catch (e) {
-    log.textContent += '\nОШИБКА: ' + e.message;
-    toast('Прошивка: ' + e.message, 'err');
+    isFlashing = false;
+    setConnState(dev.connected ? (dev.replReady ? 'repl-ready' : 'port-open') : 'disconnected');
+    if (e.name === 'NotFoundError' || /No port selected|cancel/i.test(e.message)) {
+      lastFlashRecord.status = 'отменено пользователем';
+      status('');
+      log.textContent = 'Прошивка отменена (порт не выбран).';
+    } else {
+      lastFlashRecord.status = 'ошибка: ' + e.message;
+      appendFlashLog('\nОШИБКА: ' + e.message + '\n');
+      status('Ошибка прошивки');
+      toast('Прошивка: ' + e.message, 'err');
+    }
   } finally {
+    isFlashing = false;
     $('#btn-flash').disabled = $('#btn-erase').disabled = false;
   }
 }
@@ -554,7 +932,9 @@ const COMMANDS = [
   { id: 'upload', label: 'Загрузить текущий файл на плату', key: 'Ctrl+U', run: () => uploadFile() },
   { id: 'uploadall', label: 'Загрузить все файлы проекта на плату', run: uploadAll },
   { id: 'reset', label: 'Мягкий сброс платы', key: 'Ctrl+Shift+R', run: softReset },
-  { id: 'refresh', label: 'Обновить список файлов на плате', run: refreshDevice },
+  { id: 'refresh', label: 'Проверить REPL и обновить список файлов на плате', run: refreshDevice },
+  { id: 'diag', label: 'Устройство: Диагностика таймаута REPL и журнал прошивки', run: showDiagnosticReport },
+  { id: 'update', label: 'Справка: Обновить с GitHub (проверить релиз esp32-studio-latest)', run: openUpdateModal },
   { id: 'new', label: 'Файл: Новый файл', key: 'Ctrl+N', run: () => newFile() },
   { id: 'open', label: 'Файл: Открыть с компьютера…', key: 'Ctrl+O', run: openLocal },
   { id: 'save', label: 'Файл: Сохранить проект (в браузере)', key: 'Ctrl+S', run: () => { persist(); toast('Проект сохранён в браузере', 'ok'); } },
@@ -576,7 +956,8 @@ function showHelp() {
   const out = $('#output');
   out.textContent = 'ГОРЯЧИЕ КЛАВИШИ\n\n' + COMMANDS.filter(c => c.key).map(c => `${c.key.padEnd(14)} ${c.label}`).join('\n') +
     '\n\nВ терминале: Ctrl+C — прервать программу, Ctrl+D — мягкий сброс, Ctrl+E — режим вставки.\n' +
-    'main.py на плате запускается автоматически при включении.';
+    'main.py на плате запускается автоматически при включении.\n\n' +
+    `Текущая сборка: ${describeLocalBuild()}`;
   showPanel('output');
 }
 
@@ -608,8 +989,8 @@ document.addEventListener('mousedown', (e) => { if (!$('#palette').classList.con
 // меню
 const MENUS = {
   file: ['new', 'open', 'save', 'download', null, 'rename', 'close'],
-  device: ['connect', null, 'run', 'stop', 'upload', 'uploadall', 'reset', 'refresh', null, 'flash'],
-  help: ['help', 'examples', { label: 'Документация MicroPython ESP32', run: () => window.open('https://docs.micropython.org/en/latest/esp32/quickref.html') }],
+  device: ['connect', null, 'run', 'stop', 'upload', 'uploadall', 'reset', 'refresh', 'diag', null, 'flash'],
+  help: ['update', 'diag', null, 'help', 'examples', { label: 'Документация MicroPython ESP32', run: () => window.open('https://docs.micropython.org/en/latest/esp32/quickref.html', '_blank', 'noopener,noreferrer') }],
 };
 $$('.menu').forEach(m => m.onclick = (e) => {
   const r = m.getBoundingClientRect();
@@ -637,7 +1018,7 @@ document.addEventListener('keydown', (e) => {
   if (c && e.shiftKey && k === 'c') return hit('connect');
   if (c && e.shiftKey && k === 'r') return hit('reset');
   if (e.key === 'F2') return hit('rename');
-  if (e.key === 'Escape') { closePalette(); hideDropdown(); }
+  if (e.key === 'Escape') { closePalette(); hideDropdown(); closeUpdateModal(); }
 }, true);
 
 // кнопки
@@ -652,7 +1033,8 @@ $('#btn-download').onclick = () => project.active && downloadFile(project.active
 $('#btn-devrefresh').onclick = refreshDevice;
 $('#btn-uploadall').onclick = uploadAll;
 $('#btn-flash').onclick = () => doFlash(false);
-$('#btn-erase').onclick = () => confirm('Стереть ВСЮ флеш-память платы?') && doFlash(true);
+$('#btn-erase').onclick = () =>
+  confirm('Стереть ВСЮ флеш-память платы?\nВсе файлы (main.py и др.), прошивка и данные будут безвозвратно удалены.') && doFlash(true);
 $('#sb-conn').onclick = toggleConnect;
 $('#sb-baud').onclick = () => showView('settings');
 

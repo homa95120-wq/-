@@ -1,7 +1,11 @@
 // Диалог выбора COM-порта для Web Serial внутри Electron
 const { ipcRenderer, contextBridge } = require('electron');
 
-contextBridge.exposeInMainWorld('esp32studio', { desktop: true, platform: process.platform });
+contextBridge.exposeInMainWorld('esp32studio', {
+  desktop: true,
+  platform: process.platform,
+  portable: Boolean(process.env.PORTABLE_EXECUTABLE_FILE || process.env.PORTABLE_EXECUTABLE_DIR),
+});
 
 let overlay = null;
 function closeOverlay() { overlay?.remove(); overlay = null; }

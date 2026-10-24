@@ -87,14 +87,15 @@
           <div class="pad">
             <p class="hint">Если на плате ещё нет MicroPython — прошей его здесь. Скачай .bin для своей платы с
               <a href="https://micropython.org/download/?port=esp32" target="_blank">micropython.org</a>
-              (для ESP32-S3 — «ESP32_GENERIC_S3»).</p>
+              (для ESP32-S3 N16R8 — вариант <b>ESP32_GENERIC_S3-SPIRAM_OCT</b>, 8 МБ Octal PSRAM).</p>
+            <p class="hint">N16R8: подключи кабель к COM, адрес <b>0x0</b> (или авто). При ошибках попробуй 115200. Стирание удаляет все файлы на плате.</p>
             <label class="field">Файл прошивки (.bin)
               <input type="file" id="fw-file" accept=".bin" />
             </label>
             <label class="field">Адрес записи
               <select id="fw-offset">
                 <option value="auto">авто (по чипу)</option>
-                <option value="0x0">0x0 — ESP32-S3 / S2 / C3 / C6</option>
+                <option value="0x0">0x0 — ESP32-S3 / C3 / C6</option>
                 <option value="0x1000">0x1000 — классический ESP32</option>
               </select>
             </label>

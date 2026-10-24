@@ -119,8 +119,8 @@ public class ResearchAndPlanetDirector{
                 UnlockableContent depContent = null;
                 if(obj instanceof SectorComplete sc) p = sc.preset;
                 else if(obj instanceof OnSector os) p = os.preset;
-                else if(obj instanceof Research r && r.content instanceof UnlockableContent uc) depContent = uc;
-                else if(obj instanceof Produce pr && pr.content instanceof UnlockableContent uc) depContent = uc;
+                else if(obj instanceof Research r) depContent = r.content;
+                else if(obj instanceof Produce pr) depContent = pr.content;
 
                 if(p != null && p.planet == Planets.serpulo){
                     victoryPresets.add(p);

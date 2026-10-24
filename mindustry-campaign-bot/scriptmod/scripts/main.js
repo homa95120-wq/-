@@ -2494,9 +2494,9 @@ function installMindustryCampaignBot() {
                     })).left();
                     var cont = new Table();
                     cont.setFillParent(true);
-                    cont.top().padTop(42);
+                    cont.top();
                     cont.touchable = Touchable.childrenOnly;
-                    cont.add(bar);
+                    cont.add(bar).padTop(42);
                     Vars.ui.planet.addChild(cont);
                     refreshUi();
                 }));

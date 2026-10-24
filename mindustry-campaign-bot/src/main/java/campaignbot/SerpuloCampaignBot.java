@@ -132,9 +132,9 @@ public class SerpuloCampaignBot extends Mod{
 
             Table container = new Table();
             container.setFillParent(true);
-            container.top().padTop(42f);
+            container.top();
             container.touchable = Touchable.childrenOnly;
-            container.add(bar);
+            container.add(bar).padTop(42f);
             Vars.ui.planet.addChild(container);
         }));
     }

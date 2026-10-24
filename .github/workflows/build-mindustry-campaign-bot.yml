@@ -1,0 +1,103 @@
+name: Build Serpulo Campaign Bot
+
+on:
+  push:
+    branches: ['**']
+    paths:
+      - 'mindustry-campaign-bot/**'
+      - '.github/workflows/build-mindustry-campaign-bot.yml'
+  pull_request:
+    paths:
+      - 'mindustry-campaign-bot/**'
+      - '.github/workflows/build-mindustry-campaign-bot.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  buildCampaignBot:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: 'temurin'
+          java-version: 17
+
+      - name: Pure Java campaign logic checks
+        run: |
+          mkdir -p mindustry-campaign-bot/build/logic-check
+          javac -d mindustry-campaign-bot/build/logic-check \
+            mindustry-campaign-bot/src/main/java/campaignbot/CampaignBotLogic.java \
+            mindustry-campaign-bot/src/test/java/campaignbot/CampaignBotLogicCheck.java
+          java -cp mindustry-campaign-bot/build/logic-check campaignbot.CampaignBotLogicCheck
+
+      - name: Build SerpuloCampaignBot.jar
+        run: |
+          chmod +x ./gradlew
+          ./gradlew -p mindustry-campaign-bot jar
+
+      - name: Verify SerpuloCampaignBot.jar contents and Java 17 bytecode
+        run: |
+          jar tf mindustry-campaign-bot/build/libs/SerpuloCampaignBot.jar
+          jar tf mindustry-campaign-bot/build/libs/SerpuloCampaignBot.jar | grep -qx 'mod.hjson'
+          jar tf mindustry-campaign-bot/build/libs/SerpuloCampaignBot.jar | grep -qx 'campaignbot/SerpuloCampaignBot.class'
+          unzip -p mindustry-campaign-bot/build/libs/SerpuloCampaignBot.jar campaignbot/SerpuloCampaignBot.class \
+            | head -c 8 | od -An -t u1 \
+            | awk '{ if ($8 == 61) print "class file version 61 (Java 17): OK"; else { print "unexpected class version: " $8; exit 1 } }'
+
+      - name: Test and build SerpuloCampaignBot.zip (script mod)
+        run: |
+          node mindustry-campaign-bot/test-logic.js
+          node mindustry-campaign-bot/test-campaign-sim.js
+          python3 mindustry-campaign-bot/build.py
+
+      - name: Upload SerpuloCampaignBot.jar
+        uses: actions/upload-artifact@v7
+        with:
+          archive: false
+          name: SerpuloCampaignBot-jar
+          path: mindustry-campaign-bot/build/libs/SerpuloCampaignBot.jar
+          if-no-files-found: error
+
+      - name: Upload SerpuloCampaignBot.zip
+        uses: actions/upload-artifact@v7
+        with:
+          archive: false
+          name: SerpuloCampaignBot-zip
+          path: mindustry-campaign-bot/release/SerpuloCampaignBot.zip
+          if-no-files-found: error
+
+      - name: Publish GitHub Release on main
+        if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="serpulo-campaign-bot-1.0"
+          JAR="mindustry-campaign-bot/build/libs/SerpuloCampaignBot.jar"
+          ZIP="mindustry-campaign-bot/release/SerpuloCampaignBot.zip"
+          JAR_SHA=$(sha256sum "$JAR" | cut -d' ' -f1)
+          ZIP_SHA=$(sha256sum "$ZIP" | cut -d' ' -f1)
+          NOTES=$(printf '%s\n' \
+            'Самостоятельный мод автопрохождения кампании Serpulo для **Mindustry v8** (build 154+ / `v160.7`).' \
+            '' \
+            'Два готовых файла — ставьте **только один** из них (`Mods → Import file…`):' \
+            '- `SerpuloCampaignBot.jar` — скомпилированный Java 17 мод (рекомендуется);' \
+            '- `SerpuloCampaignBot.zip` — скриптовая версия (Java не требуется).' \
+            '' \
+            "**SHA-256:**" \
+            "- \`SerpuloCampaignBot.jar\`: \`$JAR_SHA\`" \
+            "- \`SerpuloCampaignBot.zip\`: \`$ZIP_SHA\`")
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            gh release upload "$TAG" "$JAR" "$ZIP" --clobber
+          else
+            gh release create "$TAG" "$JAR" "$ZIP" \
+              --target "$GITHUB_SHA" \
+              --title "Serpulo Campaign Bot 1.0 — автопрохождение кампании Mindustry v8" \
+              --notes "$NOTES" \
+              --prerelease
+          fi

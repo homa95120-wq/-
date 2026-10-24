@@ -1,0 +1,9 @@
+name: serpulo-campaign-bot
+displayName: Serpulo Campaign Bot
+author: local
+description: Standalone honest AI autopilot mod for Mindustry v8 that completes the entire Serpulo campaign by itself: builds drills, conveyors, power networks, industrial chains, multi-tier defenses, and unit reconstructor lines, commands RTS assault armies against enemy bases, researches the TechTree using real resources, and launches from Ground Zero to Planetary Launch Terminal.
+version: 1.0
+minGameVersion: 154
+main: campaignbot.SerpuloCampaignBot
+java: true
+hidden: true

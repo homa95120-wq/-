@@ -95,7 +95,7 @@ extern "C" void app_main(void)
 
     /* Поиск пути: от (25,25) к тайлу (20,2) через A* */
     pf_path_t path;
-    bool ok = pf_find(25, 25, 20, 2, sim_sector_walkable, NULL, &path);
+    bool ok = pf_find(25, 25, 20, 2, sim_sector_walkable, g_sector, &path);
     if (ok) {
         ESP_LOGI(TAG, "path found: %u cells", (unsigned)path.len);
     } else {

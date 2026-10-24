@@ -2,8 +2,6 @@
 #include "esp_log.h"
 #include <string.h>
 
-static const char *TAG = "fluid";
-
 static inline size_t ti(int16_t x, int16_t y) {
     return (size_t)y * SIM_MAX_WIDTH + (size_t)x;
 }
@@ -84,15 +82,15 @@ void fluid_tick(fluid_network_t *net) {
             float fill = s->content.amount / cap;
 
             /* Соседи: вверх, вниз, влево, вправо */
-            int16_t nx[4] = {x, x, x - 1, x + 1};
-            int16_t ny[4] = {y - 1, y + 1, y, y};
+            int16_t nx[4] = {x, x, (int16_t)(x - 1), (int16_t)(x + 1)};
+            int16_t ny[4] = {(int16_t)(y - 1), (int16_t)(y + 1), y, y};
 
             for (int d = 0; d < 4; d++) {
                 if (!inb(nx[d], ny[d])) continue;
                 pipe_segment_t *t = &net->seg[ti(nx[d], ny[d])];
-                if (!t->active || t->type != PIPE_NORMAL && t->type != PIPE_TANK) continue;
-                /* Жидкость не перетекает через насос как через обычную трубу */
-                if (t->type == PIPE_PUMP) continue;
+                if (!t->active || (t->type != PIPE_NORMAL && t->type != PIPE_TANK)) continue;
+                /* Жидкость не перетекает через насос как через обычную трубу
+                 * (насос отсечён проверкой выше — здесь уже только труба/бак). */
 
                 float tcap = (t->type == PIPE_TANK) ? TANK_CAPACITY : PIPE_CAPACITY;
                 float tfill = t->content.amount / tcap;

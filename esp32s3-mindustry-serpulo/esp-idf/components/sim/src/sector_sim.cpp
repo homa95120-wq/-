@@ -79,14 +79,14 @@ void sim_sector_tick(sim_sector_t *s, float dt_seconds) {
         if (s->state.wave_time_left <= 0.0f) {
             s->state.wave_time_left = 10.0f;
             s->state.wave++;
-            ESP_LOGI(TAG, "wave %d started", s->state.wave);
+            ESP_LOGI(TAG, "wave %u started", (unsigned)s->state.wave);
         }
     } else {
         s->state.wave_time_left -= dt_seconds;
         if (s->state.wave_time_left <= 0.0f) {
             s->state.wave_active = true;
             s->state.wave_time_left = 30.0f;
-            ESP_LOGI(TAG, "wave %d active", s->state.wave);
+            ESP_LOGI(TAG, "wave %u active", (unsigned)s->state.wave);
         }
     }
 }
@@ -96,11 +96,10 @@ sim_tile_type_t sim_sector_tile(const sim_sector_t *s, int16_t x, int16_t y) {
     return s->map.tiles[ti(x, y)];
 }
 
-bool sim_sector_walkable(int16_t x, int16_t y, sim_tile_type_t tile_type,
-                         bool has_building, void *ctx) {
-    (void)tile_type; (void)ctx;
-    if (!inb(x, y)) return false;
-    if (has_building) return false; /* здания блокируют проход */
-    /* только FLOOR проходим */
-    return tile_type == SIM_TILE_FLOOR;
+bool sim_sector_walkable(int16_t x, int16_t y, void *ctx) {
+    const sim_sector_t *s = (const sim_sector_t *)ctx;
+    if (!s || !inb(x, y)) return false;
+    if (s->map.has_building[ti(x, y)]) return false; /* здания блокируют проход */
+    /* проходим только обычный пол (вода/лава/стены/руда — нет) */
+    return s->map.tiles[ti(x, y)] == SIM_TILE_FLOOR;
 }

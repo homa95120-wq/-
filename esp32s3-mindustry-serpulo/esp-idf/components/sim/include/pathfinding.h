@@ -25,9 +25,9 @@ typedef struct {
 } pf_path_t;
 
 /* Функция проверки проходимости тайла. Пользователь передаёт свою.
- * tile_type — тип тайла (из sim_tile_type_t), building — есть ли здание. */
-typedef bool (*pf_walkable_fn)(int16_t x, int16_t y, sim_tile_type_t tile_type,
-                               bool has_building, void *ctx);
+ * ctx — произвольный контекст (например, указатель на сектор), чтобы колбэк
+ * мог посмотреть реальный тип тайла и наличие здания в своей карте. */
+typedef bool (*pf_walkable_fn)(int16_t x, int16_t y, void *ctx);
 
 /* Поиск пути от (sx,sy) до (gx,gy). Возвращает true, если путь найден. */
 bool pf_find(int16_t sx, int16_t sy, int16_t gx, int16_t gy,

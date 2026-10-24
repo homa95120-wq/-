@@ -67,7 +67,7 @@ I (312) app_main: === mindserpulo: Serpulo simulation prototype (ESP32-S3) ===
 I (322) app_main: free PSRAM: 8385000 bytes, free internal: 380000 bytes
 I (332) app_main: sector struct: 1462328 bytes in PSRAM
 I (342) sector_sim: sector initialized
-I (352) app_main: path found: 26 cells
+I (352) app_main: path found: 29 cells
 I (1352) app_main: tick=30 wave=1 active=0 conv=11 fluid=19 power=100.0/40.0 deficit=0% units=1 projs=0
 ```
 

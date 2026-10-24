@@ -44,8 +44,8 @@ void sim_sector_tick(sim_sector_t *s, float dt_seconds);
 /* Получить тип тайла */
 sim_tile_type_t sim_sector_tile(const sim_sector_t *s, int16_t x, int16_t y);
 
-/* Проверить проходимость для A* ( колбэк pathfinding) */
-bool sim_sector_walkable(int16_t x, int16_t y, sim_tile_type_t tile_type,
-                         bool has_building, void *ctx);
+/* Проверить проходимость для A* (колбэк pathfinding).
+ * ctx должен указывать на sim_sector_t. */
+bool sim_sector_walkable(int16_t x, int16_t y, void *ctx);
 
 #endif /* SECTOR_SIM_H */

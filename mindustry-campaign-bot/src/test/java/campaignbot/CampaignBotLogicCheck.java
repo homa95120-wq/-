@@ -24,6 +24,7 @@ public final class CampaignBotLogicCheck{
         testHubCrafterAndUnitChainGeometry();
         testFortressAndSquadAndWaves();
         System.out.println("CampaignBotLogicCheck OK: " + checks + " checks passed.");
+        System.out.println("ProLogicCheck OK: " + ProLogicCheck.run() + " checks passed.");
     }
 
     private static void testStateMachine(){

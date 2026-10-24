@@ -5,6 +5,7 @@ import arc.Events;
 import arc.graphics.Color;
 import arc.scene.event.Touchable;
 import arc.scene.ui.Label;
+import arc.scene.ui.TextButton;
 import arc.scene.ui.layout.Scl;
 import arc.scene.ui.layout.Table;
 import arc.util.Time;
@@ -33,6 +34,7 @@ public class SerpuloCampaignBot extends Mod{
     private Label hudLabel;
     private Label planetLabel;
     private Table bodyTable;
+    private TextButton llmButton;
     private boolean collapsed = false;
     private float nextRefresh;
 
@@ -92,6 +94,12 @@ public class SerpuloCampaignBot extends Mod{
                 }).width(contentW).left();
                 panel.row();
 
+                llmButton = panel.button(llmButtonText(), Styles.flatt, () -> {
+                    LlmClient.setEnabled(!LlmClient.isEnabled());
+                    refreshLabels();
+                }).height(26f).width(contentW).left().get();
+                panel.row();
+
                 bodyTable = panel.table(body -> {
                     body.defaults().left().top();
                     hudLabel = body.add(composeHudString()).color(Color.white).left().width(contentW).get();
@@ -146,6 +154,22 @@ public class SerpuloCampaignBot extends Mod{
         if(planetLabel != null){
             planetLabel.setText(composePlanetString());
         }
+        if(llmButton != null){
+            llmButton.setText(llmButtonText());
+        }
+    }
+
+    private static String llmButtonText(){
+        return LlmClient.isEnabled() ? "🧠 ИИ: Gemma — ВКЛ" : "🧠 ИИ: Gemma — ВЫКЛ (встроенный планировщик)";
+    }
+
+    private String thoughtLine(){
+        try{
+            if(autopilot.pro == null || autopilot.state != RUNNING) return "";
+            return autopilot.pro.brain.hudLine();
+        }catch(Throwable t){
+            return "";
+        }
     }
 
     private String composeHudString(){
@@ -164,7 +188,8 @@ public class SerpuloCampaignBot extends Mod{
                 autopilot.lastAction,
                 autopilot.director.lastResearchSummary,
                 autopilot.armySummary,
-                detail);
+                detail,
+                thoughtLine());
     }
 
     private String composePlanetString(){

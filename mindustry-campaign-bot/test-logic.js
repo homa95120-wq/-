@@ -420,4 +420,378 @@ for (const drillSize of [2, 3, 4]) {
     ok(commandedUnitsCount === 8, `RTS commander issued assault orders to ${commandedUnitsCount} combat units`);
 }
 
+
+// =====================================================================
+// v2.0 PRO LOGIC: terrain / chokepoint / kill-box / ammo bus / flank / Gemma brain
+// =====================================================================
+{
+    // ---- synthetic cave map: core room (x<=34) -- canyon (35..60, height canyonH) -- spawn hall (x>=61)
+    function makeCave(canyonH) {
+        const W = 100, H = 60, passable = new Array(W * H).fill(0);
+        const open = (x, y) => {
+            if (x >= 4 && x <= 34 && y >= 14 && y <= 46) return true;
+            if (x >= 35 && x <= 60 && Math.abs(y - 30) <= Math.floor(canyonH / 2)) return true;
+            if (x >= 61 && x <= 95 && y >= 8 && y <= 52) return true;
+            return false;
+        };
+        for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) passable[y * W + x] = open(x, y) ? 1 : 0;
+        return { W, H, passable };
+    }
+    function floodReach(W, H, blocked, sx, sy, tx, ty) {
+        const seen = new Uint8Array(W * H), q = [sy * W + sx];
+        seen[q[0]] = 1;
+        for (let h = 0; h < q.length; h++) {
+            const c = q[h], x = c % W, y = (c - x) / W;
+            for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+                if (!dx && !dy) continue;
+                const nx = x + dx, ny = y + dy;
+                if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue;
+                const ni = ny * W + nx;
+                if (seen[ni] || blocked[ni]) continue;
+                if (dx && dy && (blocked[y * W + nx] || blocked[ny * W + x])) continue; // no corner cutting
+                seen[ni] = 1; q.push(ni);
+            }
+        }
+        return !!seen[ty * W + tx];
+    }
+
+    for (const canyonH of [7, 11]) {
+        const { W, H, passable } = makeCave(canyonH);
+        const dist = bot.distanceToWall(W, H, passable);
+        ok(dist[30 * W + 45] === Math.ceil(canyonH / 2), `distance transform in a ${canyonH}-wide canyon`);
+        const path = bot.findGroundPath(W, H, passable, dist, 90, 30, 10, 30);
+        ok(path.found && path.xs.length >= 80, "ground path spawn -> core found");
+        ok(path.xs[0] === 90 && path.xs[path.xs.length - 1] === 10, "path runs spawn -> core");
+        const chokes = bot.findChokepoints(W, H, passable, dist, [path], 10, 30);
+        ok(chokes.length === 1, "one chokepoint found");
+        const ch = chokes[0];
+        ok(ch.width === canyonH && ch.dist >= 15 && ch.dist <= 45, `choke width ${ch.width} at ${ch.dist.toFixed(1)}`);
+        ok(ch.axis === 1 && ch.fwd === 1, "wall line vertical, enemy on the +x side");
+        ok(bot.compassFlank(ch.cx - 10, ch.cy - 30) === "east", "choke flank = east");
+
+        const kb = bot.buildKillBox(W, H, passable, ch, { frontSize: 1, mainSize: 1, supportSize: 1, wantForce: true });
+        const blocked = new Uint8Array(W * H);
+        for (let i = 0; i < W * H; i++) blocked[i] = passable[i] ? 0 : 1;
+        let wallCells = 0, depthWindow = 0, depthFlank = 0;
+        const depthAt = new Map();
+        for (let s = 0; s < kb.slots.length; s += 5) {
+            const x = kb.slots[s], y = kb.slots[s + 1], size = kb.slots[s + 2], role = kb.slots[s + 3];
+            ok(x >= 0 && y >= 0 && x < W && y < H && passable[y * W + x] === 1, "slot origin on open ground");
+            if (role === bot.ROLE_WALL || role === bot.ROLE_WALL_WINDOW) {
+                const off = Math.floor((size - 1) / 2);
+                for (let dy = 0; dy < size; dy++) for (let dx = 0; dx < size; dx++) {
+                    const cx = x - off + dx, cy = y - off + dy;
+                    if (cx >= 35 && passable[cy * W + cx]) {
+                        blocked[cy * W + cx] = 1; wallCells++;
+                        depthAt.set(cy, (depthAt.get(cy) || 0) + 1);
+                    }
+                }
+            }
+        }
+        const cyLo = 30 - Math.floor(canyonH / 2), cyHi = 30 + Math.floor(canyonH / 2);
+        depthWindow = depthAt.get(Math.floor((kb.wLo + kb.wHi) / 2)) || 0;
+        depthFlank = Math.max(depthAt.get(cyLo) || 0, depthAt.get(cyHi) || 0);
+        ok(!floodReach(W, H, blocked, 55, 30, 20, 30), "walls close the canyon rock-to-rock");
+        ok(wallCells >= canyonH * 2, "wall cells placed");
+        ok(depthFlank > depthWindow && depthWindow >= 1, `flanks (${depthFlank}) thicker than the bait window (${depthWindow})`);
+        ok(kb.spineLen >= 3 && kb.spineLen % 2 === 1, "ammo spine has odd length >= 3");
+        ok(kb.winW >= 2 && kb.wLo >= ch.lo && kb.wHi <= ch.hi, "bait window inside the pass");
+        const cross = bot.killBoxCrossingP(W, H, passable, ch, kb.slots, 350);
+        ok(cross !== null && cross >= kb.wLo - 1 && cross <= kb.wHi + 1, `cheapest crossing (${cross}) funnels into the window ${kb.wLo}..${kb.wHi}`);
+        ok(bot.groundPathCostThroughWall(2000) > bot.groundPathCostThroughWall(300), "thicker HP -> higher flowfield cost");
+        // roles present
+        const roles = new Set();
+        for (let s = 0; s < kb.slots.length; s += 5) roles.add(kb.slots[s + 3]);
+        ok(roles.has(bot.ROLE_GROUND_TURRET) && roles.has(bot.ROLE_FRONT_TURRET) && roles.has(bot.ROLE_SUPPORT) && roles.has(bot.ROLE_WALL_INNER), "kill-box has strike, front, support and inner-wall roles");
+        // no two slots overlap
+        const occ = new Set();
+        let overlap = false;
+        for (let s = 0; s < kb.slots.length; s += 5) {
+            const x = kb.slots[s], y = kb.slots[s + 1], size = kb.slots[s + 2], off = Math.floor((size - 1) / 2);
+            for (let dy = 0; dy < size; dy++) for (let dx = 0; dx < size; dx++) {
+                const key = (x - off + dx) + "," + (y - off + dy);
+                if (occ.has(key)) overlap = true;
+                occ.add(key);
+            }
+        }
+        ok(!overlap, "kill-box slots never overlap");
+    }
+
+    // ---- time-sliced terrain scan (never blocks): grid + DT + A* + chokes + resources
+    {
+        const { W, H, passable } = makeCave(9);
+        const scan = bot.createTerrainScan({
+            w: W, h: H, passable: (x, y) => !!passable[y * W + x],
+            feature: (x, y) => (passable[y * W + x] && x < 20 && y < 20 ? "ore:copper" : (x === 50 && y === 30 ? "water" : "")),
+            coreX: 10, coreY: 30, sources: [90, 30]
+        });
+        let steps = 0;
+        while (!scan.step(800, 400) && steps < 5000) steps++;
+        ok(scan.done && steps > 5, `terrain scan finished in ${steps} slices`);
+        ok(scan.chokes.length === 1 && scan.chokes[0].width === 9, "scan found the canyon choke");
+        ok(scan.counts["ore:copper"] > 50 && scan.counts["water"] === 1, "scan inventoried resources");
+        const rec = bot.summarizeRecon(scan, null, 10, 30);
+        ok(rec.indexOf("copper") >= 0 && rec.indexOf("проходы: 1") >= 0, "Russian recon summary");
+    }
+
+    // ---- AA corridor on the air vector + generator cover
+    {
+        const aa = bot.planAaCorridor(50, 50, 150, 50, [60, 60, 61, 62, 20, 80], { count: 4 });
+        ok(aa.length >= 12 && aa.length % 3 === 0, "AA corridor slots");
+        ok(aa[0] > 50 && aa[0] < 80, "AA placed on the spawn->core vector");
+        let cover = 0;
+        for (let i = 2; i < aa.length; i += 3) if (aa[i] === 1) cover++;
+        ok(cover >= 1, "generator cover slot");
+    }
+
+    // ---- ammo choice
+    {
+        const stock = { copper: 800, graphite: 400, silicon: 50, pyratite: 0, thorium: 300, metaglass: 0, lead: 500 };
+        ok(bot.chooseAmmoItem("duo", stock, null, "") === "graphite", "silicon too low -> graphite for Duo");
+        ok(bot.chooseAmmoItem("salvo", stock, null, "") === "thorium", "Salvo prefers thorium when stocked");
+        ok(bot.chooseAmmoItem("duo", stock, null, "copper") === "copper", "brain preference honoured");
+        ok(bot.chooseAmmoItem("duo", stock, { graphite: false }, "") === "copper", "locked item not used");
+        ok(bot.chooseAmmoItem("scatter", { lead: 10 }, null, "") === null, "no stock -> null");
+        ok(bot.chooseBusAmmo(["duo", "hail", "salvo"], stock, null, "") === "graphite", "shared bus ammo covers all turrets");
+        ok(bot.pickTurretForAmmo(["ripple", "hail", "duo"], "graphite", { ripple: true, hail: true, duo: true }) === "ripple", "ladder pick");
+        ok(bot.pickTurretForAmmo(["ripple", "hail", "duo"], "copper", { ripple: true, hail: true, duo: true }) === "duo", "copper only fits Duo");
+        ok(bot.statusSynergy("cryofluid", "blast-compound").bonus > bot.statusSynergy("water", "graphite").bonus, "status synergy ranking");
+    }
+
+    // ---- ammo bus: Unloader -> BFS conveyor -> Router/Junction spine
+    {
+        const W = 40, H = 30, cells = new Array(W * H).fill(bot.CELL_FREE);
+        for (let y = 13; y <= 15; y++) for (let x = 13; x <= 15; x++) cells[y * W + x] = bot.CELL_CORE;
+        const spine = []; for (let x = 8; x <= 14; x++) spine.push(x, 22);
+        const unl = { x: 14, y: 16 };
+        const bus = bot.planAmmoBus(W, H, cells, unl, spine);
+        ok(bus.ok && bus.feederLength >= 1, "ammo bus planned");
+        ok(bus.pieces[2] === bot.BUS_UNLOADER, "bus starts with Unloader");
+        // follow the conveyors from the unloader to the spine start
+        const at = {}; for (let i = 0; i < bus.pieces.length; i += 4) at[bus.pieces[i] + "," + bus.pieces[i + 1]] = { type: bus.pieces[i + 2], rot: bus.pieces[i + 3] };
+        let cx = unl.x, cy = unl.y, reached = false;
+        const start = at["14,17"] || at["13,16"] || at["15,16"];
+        ok(!!start, "unloader has an adjacent feeder");
+        let cur = null; for (const k of ["14,17", "13,16", "15,16"]) if (at[k]) cur = k;
+        for (let g = 0; g < 60 && cur; g++) {
+            const [px, py] = cur.split(",").map(Number), p = at[cur];
+            if (p.type === bot.BUS_ROUTER) { reached = (px === 8 && py === 22); break; }
+            const nx = px + bot.DX[p.rot], ny = py + bot.DY[p.rot];
+            cur = at[nx + "," + ny] ? nx + "," + ny : null;
+        }
+        ok(reached, "feeder conveyors lead from the Unloader to the first Router");
+        const types = []; for (let i = 0; i < bus.pieces.length; i += 4) if (bus.pieces[i + 1] === 22) types.push(bus.pieces[i + 2]);
+        ok(types[0] === bot.BUS_ROUTER && types[1] === bot.BUS_JUNCTION && types[2] === bot.BUS_ROUTER, "spine alternates Router/Junction");
+        const keys = Object.keys(at); ok(keys.length === bus.pieces.length / 4, "no piece placed twice");
+        // blocked spine -> truncated to an odd length; fully blocked -> refusal
+        const c2 = cells.slice(); c2[22 * W + 12] = bot.CELL_BLOCKED;
+        const b2 = bot.planAmmoBus(W, H, c2, unl, spine);
+        ok(b2.ok && ((b2.pieces.filter((_, i) => i % 4 === 1).filter(v => v === 22)).length) === 3, "spine truncated before the obstacle (odd length)");
+        const c3 = cells.slice(); c3[22 * W + 8] = bot.CELL_BLOCKED;
+        ok(!bot.planAmmoBus(W, H, c3, unl, spine).ok, "blocked spine start -> refusal");
+        // drill-fed variant
+        const ore = new Array(W * H).fill(-1);
+        for (let y = 24; y <= 27; y++) for (let x = 8; x <= 11; x++) ore[y * W + x] = 1;
+        const feed = bot.planAmmoDrillFeed(W, H, cells, ore, 1, 2, 8, 22, 12);
+        ok(feed && feed.oreCount >= 2, "graphite-style drill feed found for the spine");
+        ok(bot.rectTouchesCell(10, 10, 2, 12, 10) && !bot.rectTouchesCell(10, 10, 2, 12, 13), "rectTouchesCell");
+    }
+
+    // ---- Thorium reactor guard / site
+    {
+        const rectsOverlapT = (ax, ay, as, bx, by, bs) => ax < bx + bs && bx < ax + as && ay < by + bs && by < ay + as;
+        const base = { reactorUnlocked: true, mixerBuilt: true, mixerCryoFrac: 0.9, waterOk: true, titaniumStock: 400, thoriumStock: 300, siteDistFromCore: 20 };
+        ok(bot.reactorGuard(base) === null, "reactor allowed with guaranteed cryofluid");
+        ok(bot.reactorGuard(Object.assign({}, base, { mixerBuilt: false })) !== null, "no mixer -> no reactor");
+        ok(bot.reactorGuard(Object.assign({}, base, { waterOk: false })) !== null, "no water -> no reactor");
+        ok(bot.reactorGuard(Object.assign({}, base, { mixerCryoFrac: 0.1 })) !== null, "empty cryo tank -> no reactor");
+        ok(bot.reactorGuard(Object.assign({}, base, { siteDistFromCore: 5 })) !== null, "too close to the core");
+        ok(bot.reactorShouldCutFuel(0.6, 0.1) && !bot.reactorShouldCutFuel(0.6, 0.8), "emergency fuel cut only when coolant is low");
+        const W = 60, H = 60, cells = new Array(W * H).fill(bot.CELL_FREE);
+        const site = bot.findReactorSite(W, H, cells, 30, 30, 1, 0, 14, 26);
+        ok(site && site.dist >= 14 && site.dist <= 26, "reactor site far from the core");
+        ok((site.rx - 30) < 0.35 * site.dist, "reactor not toward the enemy side");
+        ok(!rectsOverlapT(site.rx - 1, site.ry - 1, 3, site.mx, site.my, 2), "mixer does not overlap the reactor");
+        ok(!rectsOverlapT(site.mx, site.my, 2, site.ex, site.ey, 2), "water extractor does not overlap the mixer");
+    }
+
+    // ---- wave schedule (default-wave-gen-like table)
+    {
+        const groups = [
+            { type: "dagger", begin: 0, end: 10, amount: 2, scaling: 2, hp: 130, dps: 20 },
+            { type: "flare", flying: true, begin: 12, end: 30, spacing: 2, amount: 3, hp: 70, dps: 9 },
+            { type: "fortress", begin: 20, spacing: 5, amount: 1, boss: true, hp: 900, dps: 30, shield: 100 }
+        ];
+        const r = bot.analyzeWaveSchedule(groups, 10, 5, 80);
+        ok(r.firstAirWave === 13, "first air wave detected");
+        ok(r.bossWave === 21 && r.bossType === "fortress" && !r.bossFlying, "boss wave/type detected");
+        ok(r.firstGroundWave === 1, "first ground wave");
+        ok(r.forecast.length === 5 && r.forecast[0].wave === 11, "forecast covers the next 5 waves");
+        ok(r.forecast[2].airCount === 3 && r.forecast[2].types.indexOf("3xflare") >= 0, "forecast counts air groups");
+        ok(bot.waveGroupCount(groups[0], 6) === 5, "wave group scaling");
+    }
+
+    // ---- core zoning: Nucleus reserve + conveyor lanes
+    {
+        const W = 50, H = 50, z = bot.computeCoreZones(W, H, 25, 25, 3, 12);
+        ok(z[25 * W + 25 + 2] === bot.ZONE_NUCLEUS && z[(25 + 3) * W + 25] === bot.ZONE_LANE, "nucleus reserve and lanes");
+        ok(!bot.zoneAllows(bot.ZONE_NUCLEUS, bot.KIND_OTHER) && bot.zoneAllows(bot.ZONE_LANE, bot.KIND_CONVEYOR) && !bot.zoneAllows(bot.ZONE_LANE, bot.KIND_OTHER), "zone rules");
+        ok(bot.zoneAllows(bot.ZONE_NONE, bot.KIND_OTHER), "free zone allows anything");
+    }
+
+    // ---- after-action heat map
+    {
+        const heat = bot.createDamageHeat();
+        for (let i = 0; i < 30; i++) heat.record(80, 52, 40, false);
+        heat.record(10, 10, 20, true);
+        ok(bot.pickBreachReinforcement(createHeatDummy(), 50, 50, 600) === null, "no meaningful damage -> no reinforcement");
+        const br = bot.pickBreachReinforcement(heat, 50, 50, 600);
+        ok(br && br.flank === "east" && !br.air && br.amount >= 1200, "hot spot east of the core -> reinforce east");
+        ok(heat.airShare() < 0.1, "air share tracked");
+        heat.reset(); ok(heat.total === 0, "heat reset");
+        function createHeatDummy() { return bot.createDamageHeat(); }
+    }
+
+    // ---- danger map + flank route
+    {
+        const W = 120, H = 80, passable = new Array(W * H).fill(1);
+        const danger = bot.buildDangerGrid(W, H, [{ x: 60, y: 40, r: 18, weight: 1 }]);
+        const direct = bot.straightPathDanger(W, H, danger, 10, 40, 110, 40);
+        ok(direct > 0, "straight route crosses the turret range");
+        const route = bot.planFlankRoute(W, H, danger, passable, 10, 40, 110, 40, {});
+        ok(route.useFlank && route.waypoints.length >= 4, "flank route chosen");
+        ok(route.danger < route.directDanger * 0.5 && route.length < route.directLength * 1.6, "flank is safer and not absurdly long");
+        const last = route.waypoints.length;
+        ok(route.waypoints[last - 2] === 110 && route.waypoints[last - 1] === 40, "route ends at the goal");
+        const safe = bot.planFlankRoute(W, H, bot.buildDangerGrid(W, H, []), passable, 10, 40, 110, 40, {});
+        ok(!safe.useFlank && safe.waypoints.length === 2, "no threats -> go straight");
+        // walls force the route; air route ignores passable
+        const rock = passable.slice(); for (let y = 0; y < 60; y++) rock[y * W + 60] = 0;
+        const around = bot.planFlankRoute(W, H, bot.buildDangerGrid(W, H, []), rock, 10, 30, 110, 30, {});
+        ok(around.waypoints.length >= 2, "route search survives walls");
+    }
+
+    // ---- assault priorities + wounded retreat
+    {
+        const cands = [
+            { kind: "turret", x: 100, y: 50, powered: true }, { kind: "power-node", x: 110, y: 60 },
+            { kind: "generator", x: 120, y: 70 }, { kind: "core", x: 130, y: 50 }, { kind: "ammo-feed", x: 105, y: 52 }
+        ];
+        ok(cands[bot.pickAssaultTarget(cands, { x: 50, y: 50 }, { turrets: 4, disarmed: 0 })].kind === "generator", "generators first");
+        const noGen = cands.filter(c => c.kind !== "generator");
+        ok(noGen[bot.pickAssaultTarget(noGen, { x: 50, y: 50 }, { turrets: 4, disarmed: 0 })].kind === "power-node", "then power nodes");
+        const onlyTc = [cands[0], cands[3]];
+        ok(onlyTc[bot.pickAssaultTarget(onlyTc, { x: 50, y: 50 }, { turrets: 4, disarmed: 0 })].kind === "turret", "core waits while turrets are armed");
+        onlyTc[0].powered = false;
+        ok(onlyTc[bot.pickAssaultTarget(onlyTc, { x: 50, y: 50 }, { turrets: 4, disarmed: 4 })].kind === "core", "disarmed base -> go for the core");
+        const sp = bot.splitSquadByHealth([{ id: 1, hpFrac: 0.9 }, { id: 2, hpFrac: 0.3 }, { id: 3, hpFrac: 0.6 }, { id: 4, hpFrac: 0.9 }], { 3: true, 4: true });
+        ok(sp.retreat.join() === "2,3" && sp.fight.join() === "1,4", "retreat below 45%, return only above 85% (hysteresis)");
+    }
+
+    // ---- unit chains T1..T5
+    {
+        const unl = { "ground-factory": true, dagger: true, mace: true, fortress: true, scepter: true, reign: true,
+            "additive-reconstructor": true, "multiplicative-reconstructor": true, "exponential-reconstructor": true, "tetrative-reconstructor": true };
+        const l8 = bot.chooseUnitLine(8, unl, false, false);
+        ok(l8 && l8.line === "ground" && l8.tiers === 5 && l8.chain[4] === "reign", "diff>=8 aims for the T5 Reign");
+        const l3 = bot.chooseUnitLine(4, Object.assign({}, unl, { "exponential-reconstructor": false }), false, false);
+        ok(l3.tiers === 3, "diff 4 -> T3 chain");
+        const limited = bot.chooseUnitLine(8, Object.assign({}, unl, { "exponential-reconstructor": false }), false, false);
+        ok(limited.tiers === 3, "missing T4 reconstructor limits the chain");
+        const W = 70, H = 70, cells = new Array(W * H).fill(bot.CELL_FREE);
+        for (let y = 33; y <= 35; y++) for (let x = 33; x <= 35; x++) cells[y * W + x] = bot.CELL_CORE;
+        const chain = bot.findUnitChainSlotTiers(W, H, cells, 34, 34, true, 5);
+        ok(chain && chain.stages.length === 6, "T1..T5 chain with PayloadConveyor spacer fits");
+        ok(chain.stages[4].kind === "payload" && chain.stages[5].kind === "tetrative-reconstructor", "payload conveyor before T5");
+    }
+
+    // ---- Gemma brain: JSON parsing, prompt budget, fallback, timeouts
+    {
+        const good = JSON.stringify({ message: { role: "assistant", content: JSON.stringify({ thought: "Строю ПВО у генераторов", priority: "BUILD_AA_SHIELD", flank: "north-east", ammo: "Graphite", aggression: 0.25 }) } });
+        const p = bot.parseLlmResponse(good);
+        ok(p.ok && p.priority === "BUILD_AA_SHIELD" && p.flank === "north-east" && p.ammo === "graphite" && p.aggression === 0.25, "Ollama /api/chat reply parsed");
+        ok(bot.parseLlmResponse(JSON.stringify({ response: "```json\n{\"priority\":\"hold and research\",\"aggression\":7}\n```" })).aggression === 1, "generate-style + fenced + clamped");
+        ok(bot.parseLlmResponse(JSON.stringify({ choices: [{ message: { content: "{\"priority\":\"BUILD_POWER\"}" } }] })).ok, "OpenAI-compatible reply parsed");
+        ok(bot.parseLlmResponse("{\"priority\":\"CALL_WAVE_EARLY\",\"thought\":\"go\"}").ok, "bare plan parsed");
+        for (const bad of ["", "   ", "garbage", "{\"message\":{\"content\":\"{broken\"}}", "{\"message\":", "{\"message\":{\"content\":\"{\\\"priority\\\":\\\"DROP_TABLES\\\"}\"}}", null, undefined, 42, "{\"priority\":null}"]) {
+            let r; try { r = bot.parseLlmResponse(bad); } catch (e) { r = null; }
+            ok(r && r.ok === false && typeof r.error === "string", "broken response never throws: " + String(bad).slice(0, 20));
+        }
+        const th = bot.parseLlmResponse(JSON.stringify({ priority: "BUILD_POWER", thought: "[red]hack[]\n" + "я".repeat(400), ammo: "uranium", flank: "up", aggression: "x" }));
+        ok(th.ok && th.thought.indexOf("[") < 0 && th.thought.length <= 170 && th.ammo === "" && th.flank === "any" && th.aggression === 0.5, "thought sanitised, junk fields normalised");
+
+        const sit = {
+            attackMode: false, sectorName: "frozenForest", wave: 7, winWave: 15, enemies: 0, coreName: "shard",
+            items: { copper: 900, lead: 400, graphite: 150, silicon: 60, titanium: 0 }, income: { copper: 3.2, lead: 1.1 }, power: 1.5,
+            forecast: bot.analyzeWaveSchedule([{ type: "dagger", begin: 0, amount: 3, scaling: 2, hp: 130, dps: 20 }, { type: "flare", flying: true, begin: 8, spacing: 1, amount: 2, hp: 70, dps: 9 }], 6, 5, 60),
+            chokeCount: 1, chokeWidth: 8, chokeDist: 27, chokeFlank: "east", weakFlank: "east", fortressBuilt: false, aaBuilt: false,
+            turrets: 2, defenseDps: 120, armyUnits: 0, turretsAvailable: ["duo", "hail", "scatter"], aaAvailable: true,
+            busPossible: true, canCallWave: true
+        };
+        const prompt = bot.buildLlmPrompt(sit);
+        ok(prompt.length < 2400, `prompt is compact (${prompt.length} chars ~ ${Math.round(prompt.length / 3.5)} tokens)`);
+        ok(prompt.indexOf("BUILD_CHOKEPOINT_FORTRESS") >= 0 && prompt.indexOf("FIRST_AIR_WAVE") >= 0, "prompt lists plans and the forecast");
+        const body = JSON.parse(bot.buildLlmRequestBody("gemma4:e2b", prompt));
+        ok(body.model === "gemma4:e2b" && body.stream === false && body.format === "json" && body.messages.length === 2, "Ollama request body");
+
+        const h = bot.heuristicPlan(sit);
+        ok(h.ok && h.source === "heuristic" && /[а-яё]/i.test(h.thought) && h.priority === "BUILD_AA_SHIELD", "heuristic: air in <=2 waves and no AA -> AA shield (Russian thought)");
+        ok(bot.heuristicPlan(Object.assign({}, sit, { aaBuilt: true })).priority === "BUILD_CHOKEPOINT_FORTRESS", "heuristic: then the choke fortress");
+        ok(bot.heuristicPlan(Object.assign({}, sit, { breach: { air: false, flank: "south", amount: 900 } })).priority === "REINFORCE_BREACH", "heuristic: breach first");
+        ok(bot.heuristicPlan(Object.assign({}, sit, { attackMode: true, enemyBaseKnown: true, enemyPowerNodes: 3, armyUnits: 6 })).priority === "SNIPE_ENEMY_POWER", "heuristic: snipe enemy power");
+
+        // brain with a fake async transport
+        let clock = 100, pending = [], posts = 0;
+        const env = { enabled: () => true, url: () => "http://127.0.0.1:11434/api/chat", model: () => "gemma4:e2b", now: () => clock, post: (url, b, t, cb) => { posts++; pending.push(cb); } };
+        const brain = bot.createLlmBrain(env);
+        let plan = brain.update(sit);
+        ok(plan.source === "heuristic" && posts === 1, "first tick: instant heuristic + one non-blocking request");
+        brain.update(sit); ok(posts === 1, "no second request while one is in flight");
+        clock += 1;
+        pending.shift()(true, good);
+        plan = brain.update(sit);
+        ok(plan.source === "gemma" && plan.priority === "BUILD_AA_SHIELD" && brain.hudLine().indexOf("💭 Мысль:") === 0, "Gemma plan applied + HUD thought line");
+        clock += 30; plan = brain.update(sit); ok(plan.source === "gemma" && posts === 2, "plan reused within the TTL; refresh every ~10 s");
+        pending.shift()(true, "{garbage");
+        clock += 70; plan = brain.update(sit);
+        ok(plan.source === "heuristic" && brain.badCount === 1, "broken JSON -> instant fallback, no exception");
+        clock += 15; brain.update(sit); pending.shift()(false, "timeout");
+        ok(brain.failures === 2, "failures counted");
+        for (let i = 0; i < 6; i++) { clock += 130; brain.update(sit); if (pending.length) pending.shift()(false, "refused"); }
+        const sentBefore = posts; clock += 5; brain.update(sit);
+        ok(posts === sentBefore && bot.llmBackoffInterval(8) <= 120, "exponential backoff while Ollama is down");
+        plan = brain.update(sit);
+        ok(plan.ok && plan.source === "heuristic" && brain.status.indexOf("Ollama недоступна") >= 0, "Ollama down: campaign continues on the built-in planner");
+        // infeasible plan from the model is ignored
+        const clock2 = { t: 0 }; const pend2 = [];
+        const b2 = bot.createLlmBrain({ enabled: () => true, url: () => "u", model: () => "m", now: () => clock2.t, post: (u, bd, t, cb) => pend2.push(cb) });
+        b2.update(sit); pend2.shift()(true, JSON.stringify({ priority: "ASSAULT_BASE", thought: "x" }));
+        ok(b2.update(sit).source === "heuristic", "infeasible model plan (no attack mode) rejected");
+        // post() that throws, and a disabled switch
+        const b3 = bot.createLlmBrain({ enabled: () => true, url: () => "u", model: () => "m", now: () => 0, post: () => { throw new Error("boom"); } });
+        ok(b3.update(sit).ok && b3.failures === 1, "throwing transport is contained");
+        let posted = 0;
+        const b4 = bot.createLlmBrain({ enabled: () => false, url: () => "u", model: () => "m", now: () => 0, post: () => { posted++; } });
+        ok(b4.update(sit).source === "heuristic" && posted === 0 && b4.status.indexOf("выкл") >= 0, "switch off: no network at all");
+        // late/stale responses are ignored
+        const b5 = bot.createLlmBrain({ enabled: () => true, url: () => "u", model: () => "m", now: () => 0, post: (u, bd, t, cb) => pend2.push(cb) });
+        b5.update(sit); b5.onResponse(999, true, good); ok(b5.llmPlan === null, "stale response ignored");
+    }
+
+    // ---- strategy bias in decideSector (v1 behaviour unchanged without the new fields)
+    {
+        const o = { drills: 4, drillPossible: false, industryPossible: true, armyPossible: false, defenseSlots: 0, captured: false, waves: true, waveSending: true, waveTimer: true, waveTimeSec: 500, defenseDps: 400, defensePoolHp: 4000, nextWaveHp: 300, nextWaveDps: 40 };
+        const base = bot.decideSector(o);
+        const hold = bot.decideSector(Object.assign({}, o, { industryPossible: false, priority: "HOLD_AND_RESEARCH" }));
+        const none = bot.decideSector(Object.assign({}, o, { industryPossible: false }));
+        ok(hold.action !== bot.ACT_CALL_WAVE, "HOLD_AND_RESEARCH blocks early wave calls");
+        ok(none.action === bot.ACT_CALL_WAVE || none.action === bot.ACT_MINE || none.action === bot.ACT_WAIT, "v1 flow untouched without a priority");
+        const si = bot.decideSector(Object.assign({}, o, { priority: "EXPAND_SILICON_ECONOMY" }));
+        ok(si.action === bot.ACT_INDUSTRY, "silicon-economy plan pulls industry forward");
+        const aggressive = bot.decideSector(Object.assign({}, o, { industryPossible: false, aggression: 1 }));
+        ok(bot.aggressionSafetyScale(1) < bot.aggressionSafetyScale(0) && bot.aggressionSafetyScale(undefined) === 1 && !!aggressive, "aggression scales the wave-call safety margin");
+        ok(base.action === bot.ACT_INDUSTRY, "baseline decision sanity");
+    }
+}
+
 console.log(`test-logic.js OK: ${checks} assertions passed.`);

@@ -328,12 +328,13 @@ function waveCallProblem(o) {
     if ((o.secondsSinceWaveCall === undefined ? 1e9 : o.secondsSinceWaveCall) < WAVE_CALL_COOLDOWN_SEC) {
         return "пауза между волнами";
     }
+    if (o.priority === "HOLD_AND_RESEARCH" && o.waveTimer) return "стратегия: копим ресурсы и науку, волну не торопим";
     var strongEnough = canSurviveWave(
         o.defenseDps || 0,
         o.defensePoolHp || 0,
         o.nextWaveHp || 0,
         o.nextWaveDps || 0,
-        o.waveTimer ? 2.2 : 1.15
+        (o.waveTimer ? 2.2 : 1.15) * aggressionSafetyScale(o.aggression)
     );
     if (o.waveTimer) {
         if (o.waveTimeSec >= 0 && o.waveTimeSec < EARLY_CALL_MIN_TIMER_SEC) {
@@ -371,6 +372,13 @@ function decideSector(o) {
     }
     if ((o.drills || 0) < 3 && o.drillPossible) {
         return { action: ACT_DRILL, reason: "стартовые буры (" + (o.drills || 0) + "/3)" };
+    }
+    // v2.0 strategic bias: the planner (Gemma or heuristic) can pull industry / army forward
+    if (!o.captured && o.priority === "EXPAND_SILICON_ECONOMY" && o.industryPossible && (o.drills || 0) >= 3 && (o.defenseSlots || 0) <= 2) {
+        return { action: ACT_INDUSTRY, reason: "стратегия: расширяю кремниевую экономику" };
+    }
+    if (!o.captured && (o.priority === "BUILD_T3_AIR_FLANK" || o.priority === "BUILD_ARMY") && o.armyPossible && (o.drills || 0) >= 3 && (o.defenseSlots || 0) <= 2) {
+        return { action: ACT_ARMY, reason: "стратегия: строю армию (" + o.priority + ")" };
     }
     if (!o.captured && (o.defenseSlots || 0) > 0) {
         return { action: ACT_DEFEND, reason: "укрепляю оборону (" + o.defenseSlots + ")" };
@@ -469,7 +477,7 @@ function coreDistances(w, h, cells, maxPath) {
     for (var y = 0; y < h; y++) {
         for (var x = 0; x < w; x++) {
             var idx = y * w + x;
-            if (cells[idx] !== CELL_FREE) continue;
+            if (cells[idx] !== CELL_FREE && cells[idx] !== CELL_LANE) continue;
             for (var d = 0; d < 4; d++) {
                 var nx = x + DX[d], ny = y + DY[d];
                 if (nx >= 0 && ny >= 0 && nx < w && ny < h && cells[ny * w + nx] === CELL_CORE) {
@@ -488,7 +496,7 @@ function coreDistances(w, h, cells, maxPath) {
             var rx = cx + DX[dir], ry = cy + DY[dir];
             if (rx < 0 || ry < 0 || rx >= w || ry >= h) continue;
             var n = ry * w + rx;
-            if (cells[n] !== CELL_FREE || dist[n] !== -1) continue;
+            if ((cells[n] !== CELL_FREE && cells[n] !== CELL_LANE) || dist[n] !== -1) continue;
             dist[n] = dist[cur] + 1;
             queue.push(n);
         }
@@ -560,7 +568,7 @@ function findDrillSite(w, h, cells, ore, item, size, maxPath) {
                     if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
                     var n = ny * w + nx;
                     if (cells[n] === CELL_CORE) touchesCore = true;
-                    else if (cells[n] === CELL_FREE && dist[n] >= 0 && dist[n] < startDist) {
+                    else if ((cells[n] === CELL_FREE || cells[n] === CELL_LANE) && dist[n] >= 0 && dist[n] < startDist) {
                         startDist = dist[n];
                         startCell = n;
                     }
@@ -871,6 +879,1701 @@ function formatHudText(state, capturedPresets, totalPresets, sectorTitle, phaseT
     if (armyText) lines.push("⚔ Армия: [lightgray]" + armyText + "[]");
     if (detailText) lines.push("💬 [lightgray]" + detailText + "[]");
     return lines.join("\n");
+}
+
+// ============================================================================
+// v2.0 PRO LOGIC — pure deterministic algorithms (no Mindustry dependencies).
+// Terrain analysis -> chokepoints -> kill-box fortress -> ammo bus -> AA umbrella
+// -> reactor safety -> wave recon -> core zoning -> after-action heat map ->
+// danger-map flank routing -> assault priorities -> unit tier chains.
+// Mirrored 1:1 by campaignbot/ProLogic.java.
+// ============================================================================
+
+var CELL_LANE = 5;
+
+var ROLE_WALL_WINDOW = 5;
+var ROLE_WALL_INNER = 6;
+var ROLE_FRONT_TURRET = 7;
+var ROLE_FORCE = 8;
+var ROLE_OVERDRIVE = 9;
+var ROLE_LIQUID_TURRET = 10;
+var ROLE_POINT_DEFENSE = 11;
+
+var ZONE_NONE = 0;
+var ZONE_NUCLEUS = 1;
+var ZONE_LANE = 2;
+var KIND_CONVEYOR = 0;
+var KIND_LOGISTICS = 1;
+var KIND_OTHER = 2;
+
+var BUS_CONVEYOR = 0;
+var BUS_ROUTER = 1;
+var BUS_JUNCTION = 2;
+var BUS_UNLOADER = 3;
+
+var CHOKE_MIN_DIST = 15;
+var CHOKE_MAX_DIST = 45;
+var CHOKE_MIN_WIDTH = 3;
+var CHOKE_MAX_WIDTH = 14;
+
+function fillArray(n, v) {
+    var a = new Array(n);
+    for (var i = 0; i < n; i++) a[i] = v;
+    return a;
+}
+
+function inBounds(w, h, x, y) {
+    return x >= 0 && y >= 0 && x < w && y < h;
+}
+
+// ------------------------------------------------------------ terrain analysis
+
+/** Chebyshev distance transform: distance of every passable cell to the nearest rock / map edge. */
+function distanceToWall(w, h, passable) {
+    var n = w * h;
+    var dist = fillArray(n, -1);
+    var queue = new Array(n);
+    var head = 0, tail = 0, i, x, y;
+    for (i = 0; i < n; i++) {
+        if (!passable[i]) { dist[i] = 0; queue[tail++] = i; }
+    }
+    for (i = 0; i < n; i++) {
+        if (!passable[i]) continue;
+        x = i % w; y = (i - x) / w;
+        if (x === 0 || y === 0 || x === w - 1 || y === h - 1) { dist[i] = 1; queue[tail++] = i; }
+    }
+    while (head < tail) {
+        i = queue[head++];
+        x = i % w; y = (i - x) / w;
+        for (var dy = -1; dy <= 1; dy++) {
+            for (var dx = -1; dx <= 1; dx++) {
+                if (dx === 0 && dy === 0) continue;
+                var nx = x + dx, ny = y + dy;
+                if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
+                var ni = ny * w + nx;
+                if (dist[ni] !== -1) continue;
+                dist[ni] = dist[i] + 1;
+                queue[tail++] = ni;
+            }
+        }
+    }
+    return dist;
+}
+
+/**
+ * Resumable A* over the ground-passability grid (time-sliced so the game thread
+ * is never blocked). Costs mimic Mindustry's costGround: +2 next to solid rock.
+ */
+function createPathSearch(w, h, passable, dist, sx, sy, tx, ty) {
+    var n = w * h;
+    var s = { done: false, found: false, expansions: 0, xs: [], ys: [] };
+    if (!inBounds(w, h, sx, sy) || !inBounds(w, h, tx, ty) || !passable[sy * w + sx] || !passable[ty * w + tx]) {
+        s.done = true;
+        return s;
+    }
+    var g = fillArray(n, 1000000000);
+    var parent = fillArray(n, -1);
+    var closed = fillArray(n, 0);
+    var hIdx = [], hKey = [];
+    var hSize = 0;
+
+    function push(idx, key) {
+        var i = hSize++;
+        hIdx[i] = idx; hKey[i] = key;
+        while (i > 0) {
+            var p = (i - 1) >> 1;
+            if (hKey[p] <= hKey[i]) break;
+            var ti = hIdx[p], tk = hKey[p];
+            hIdx[p] = hIdx[i]; hKey[p] = hKey[i];
+            hIdx[i] = ti; hKey[i] = tk;
+            i = p;
+        }
+    }
+    function pop() {
+        var top = hIdx[0];
+        hSize--;
+        if (hSize > 0) {
+            hIdx[0] = hIdx[hSize]; hKey[0] = hKey[hSize];
+            var i = 0;
+            for (;;) {
+                var l = 2 * i + 1, r = l + 1, m = i;
+                if (l < hSize && hKey[l] < hKey[m]) m = l;
+                if (r < hSize && hKey[r] < hKey[m]) m = r;
+                if (m === i) break;
+                var ti = hIdx[m], tk = hKey[m];
+                hIdx[m] = hIdx[i]; hKey[m] = hKey[i];
+                hIdx[i] = ti; hKey[i] = tk;
+                i = m;
+            }
+        }
+        return top;
+    }
+    function heur(x, y) {
+        var dx = Math.abs(x - tx), dy = Math.abs(y - ty);
+        return 10 * Math.max(dx, dy) + 4 * Math.min(dx, dy);
+    }
+
+    var start = sy * w + sx, goal = ty * w + tx;
+    g[start] = 0;
+    push(start, heur(sx, sy));
+
+    s.step = function (maxExpansions) {
+        if (s.done) return true;
+        var budget = maxExpansions;
+        while (hSize > 0 && budget-- > 0) {
+            var cur = pop();
+            if (closed[cur]) continue;
+            closed[cur] = 1;
+            s.expansions++;
+            if (cur === goal) {
+                var path = [];
+                for (var c = goal; c !== -1; c = parent[c]) path.push(c);
+                path.reverse();
+                for (var q = 0; q < path.length; q++) {
+                    s.xs.push(path[q] % w);
+                    s.ys.push((path[q] - (path[q] % w)) / w);
+                }
+                s.found = true;
+                s.done = true;
+                return true;
+            }
+            var x = cur % w, y = (cur - x) / w;
+            for (var dy = -1; dy <= 1; dy++) {
+                for (var dx = -1; dx <= 1; dx++) {
+                    if (dx === 0 && dy === 0) continue;
+                    var nx = x + dx, ny = y + dy;
+                    if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
+                    var ni = ny * w + nx;
+                    if (!passable[ni] || closed[ni]) continue;
+                    if (dx !== 0 && dy !== 0 && (!passable[y * w + nx] || !passable[ny * w + x])) continue;
+                    var step = (dx !== 0 && dy !== 0) ? 14 : 10;
+                    if (dist && dist[ni] >= 0 && dist[ni] <= 1) step += 20;
+                    var ng = g[cur] + step;
+                    if (ng < g[ni]) {
+                        g[ni] = ng;
+                        parent[ni] = cur;
+                        push(ni, ng + heur(nx, ny));
+                    }
+                }
+            }
+        }
+        if (hSize === 0) s.done = true;
+        return s.done;
+    };
+    return s;
+}
+
+function findGroundPath(w, h, passable, dist, sx, sy, tx, ty) {
+    var s = createPathSearch(w, h, passable, dist, sx, sy, tx, ty);
+    if (s.step) s.step(2000000000);
+    return { found: s.found, xs: s.xs, ys: s.ys };
+}
+
+/** Passable run (min/max coordinate along the wall line) through (x, y). axis 1 = wall runs along Y. */
+function scanRun(w, h, passable, axis, x, y, cap) {
+    var c = axis === 1 ? y : x;
+    var lo = c, hi = c;
+    function ok(v) {
+        var px = axis === 1 ? x : v, py = axis === 1 ? v : y;
+        return inBounds(w, h, px, py) && !!passable[py * w + px];
+    }
+    while (hi - lo + 1 <= cap && ok(hi + 1)) hi++;
+    while (hi - lo + 1 <= cap && ok(lo - 1)) lo--;
+    return { lo: lo, hi: hi, width: hi - lo + 1 };
+}
+
+/** Map (p along the wall line, k depth toward enemy) of a chokepoint to tile coordinates. */
+function chokePos(ch, p, k) {
+    return ch.axis === 1 ? [ch.cx + ch.fwd * k, p] : [p, ch.cy + ch.fwd * k];
+}
+
+function distPointToPoint(ax, ay, bx, by) {
+    var dx = ax - bx, dy = ay - by;
+    return Math.sqrt(dx * dx + dy * dy);
+}
+
+/**
+ * Finds the narrowest 3..14 tile bottleneck on every spawn->core corridor,
+ * 15..45 tiles from the core, closed rock-to-rock.
+ * paths: [{xs:[], ys:[]}] ordered spawn -> core.
+ */
+function findChokepoints(w, h, passable, dist, paths, coreX, coreY, opts) {
+    opts = opts || {};
+    var minD = opts.minDist || CHOKE_MIN_DIST, maxD = opts.maxDist || CHOKE_MAX_DIST;
+    var minW = opts.minWidth || CHOKE_MIN_WIDTH, maxW = opts.maxWidth || CHOKE_MAX_WIDTH;
+    var found = [];
+    for (var pi = 0; pi < paths.length; pi++) {
+        var path = paths[pi];
+        if (!path || !path.xs || path.xs.length < 10) continue;
+        var best = null;
+        for (var i = 0; i < path.xs.length; i++) {
+            var x = path.xs[i], y = path.ys[i];
+            var d = distPointToPoint(x, y, coreX, coreY);
+            if (d < minD || d > maxD) continue;
+            var j0 = Math.max(0, i - 4), j1 = Math.min(path.xs.length - 1, i + 4);
+            var tx = path.xs[j1] - path.xs[j0], ty = path.ys[j1] - path.ys[j0];
+            if (tx === 0 && ty === 0) continue;
+            var axis, fwd;
+            if (Math.abs(tx) >= Math.abs(ty)) { axis = 1; fwd = tx > 0 ? -1 : 1; }
+            else { axis = 0; fwd = ty > 0 ? -1 : 1; }
+            var run = scanRun(w, h, passable, axis, x, y, 40);
+            if (run.width < minW || run.width > maxW) continue;
+            var score = run.width * 100 + d * 3;
+            if (!best || score < best.score) {
+                var idx = y * w + x;
+                best = {
+                    score: score, axis: axis, fwd: fwd, cx: x, cy: y,
+                    lo: run.lo, hi: run.hi, width: run.width,
+                    p0: Math.floor((run.lo + run.hi) / 2),
+                    dist: d, dtWidth: dist ? 2 * dist[idx] - 1 : run.width, pathIndex: i
+                };
+            }
+        }
+        if (!best) continue;
+        var dup = false;
+        for (var f = 0; f < found.length; f++) {
+            if (Math.abs(found[f].cx - best.cx) + Math.abs(found[f].cy - best.cy) <= 10) { dup = true; break; }
+        }
+        if (!dup) found.push(best);
+    }
+    found.sort(function (a, b) { return a.score - b.score; });
+    return found;
+}
+
+/** Eight-way compass name of a direction (y grows to the north, like the Mindustry world). */
+function compassFlank(dx, dy) {
+    if (Math.abs(dx) < 1e-6 && Math.abs(dy) < 1e-6) return "any";
+    var ang = Math.atan2(dy, dx) * 180 / Math.PI;
+    if (ang < 0) ang += 360;
+    var names = ["east", "north-east", "north", "north-west", "west", "south-west", "south", "south-east"];
+    return names[Math.floor((ang + 22.5) / 45) % 8];
+}
+
+function flankVector(name) {
+    var m = {
+        "east": [1, 0], "north-east": [1, 1], "north": [0, 1], "north-west": [-1, 1],
+        "west": [-1, 0], "south-west": [-1, -1], "south": [0, -1], "south-east": [1, -1]
+    };
+    return m[name] || null;
+}
+
+// ------------------------------------------------------- kill-box fortress
+
+/**
+ * Builds the chokepoint "kill-box" layout. Returns flat 5-tuples
+ * [x, y, size, role, layer] (x/y = Mindustry block origin tile) plus the ammo
+ * bus spine [x, y, ...] running behind the front turret row.
+ *
+ * Layers (depth k grows toward the enemy):
+ *   walls     k = 0 .. 2*flankLayers-1 (2x2 large walls, singles fill the gaps),
+ *             flanks next to the rocks have flankLayers layers, the focus
+ *             "bait window" in the middle has one layer less (recessed pocket)
+ *             so Mindustry's ground flowfield (wall HP cost) funnels the whole
+ *             wave into the crossfire point;
+ *   inner     k = -2 .. -1 plastanium layer that absorbs piercing lasers;
+ *   front     turret row right behind the inner layer;
+ *   bus spine Router/Junction line behind the front row;
+ *   main      main strike row on the other side of the spine;
+ *   support   menders/projectors, power node, force + overdrive projectors.
+ */
+function buildKillBox(w, h, passable, ch, opts) {
+    opts = opts || {};
+    var fs = opts.frontSize || 1, ms = opts.mainSize || 1, ss = opts.supportSize || 1;
+    var width = ch.width;
+    var flankLayers = opts.flankLayers || (width >= 8 ? 3 : 2);
+    var windowLayers = Math.max(1, flankLayers - 1);
+    var winW = Math.max(2, 2 * Math.round(width / 6));
+    winW = Math.min(winW, Math.max(1, width - 2));
+    var p0 = ch.p0;
+    var wLo = p0 - Math.floor(winW / 2), wHi = wLo + winW - 1;
+    var slots = [];
+    var used = {};
+
+    function cellOk(p, k) {
+        var xy = chokePos(ch, p, k);
+        return inBounds(w, h, xy[0], xy[1]) && !!passable[xy[1] * w + xy[0]];
+    }
+    function usedKey(p, k) { return p + "," + k; }
+    function rowSpan(k) {
+        var start = null;
+        for (var d = 0; d <= 3 && start === null; d++) {
+            if (cellOk(p0 + d, k)) start = p0 + d;
+            else if (cellOk(p0 - d, k)) start = p0 - d;
+        }
+        if (start === null) return null;
+        var lo = start, hi = start;
+        while (hi - lo < 40 && cellOk(hi + 1, k)) hi++;
+        while (hi - lo < 40 && cellOk(lo - 1, k)) lo--;
+        return { lo: lo, hi: hi };
+    }
+    function originOf(pA, pB, kA, kB, size) {
+        var a = chokePos(ch, pA, kA), b = chokePos(ch, pB, kB);
+        var off = Math.floor((size - 1) / 2);
+        return [Math.min(a[0], b[0]) + off, Math.min(a[1], b[1]) + off];
+    }
+    function footprintOk(pA, pB, kA, kB) {
+        for (var p = pA; p <= pB; p++) {
+            for (var k = Math.min(kA, kB); k <= Math.max(kA, kB); k++) {
+                if (!cellOk(p, k) || used[usedKey(p, k)]) return false;
+            }
+        }
+        return true;
+    }
+    function markFootprint(pA, pB, kA, kB) {
+        for (var p = pA; p <= pB; p++) {
+            for (var k = Math.min(kA, kB); k <= Math.max(kA, kB); k++) used[usedKey(p, k)] = true;
+        }
+    }
+    function addBlock(pA, size, kTop, role, layer) {
+        // footprint spans p = pA..pA+size-1 and depth kTop-(size-1)..kTop
+        var pB = pA + size - 1, kBot = kTop - (size - 1);
+        if (!footprintOk(pA, pB, kBot, kTop)) return false;
+        markFootprint(pA, pB, kBot, kTop);
+        var o = originOf(pA, pB, kBot, kTop, size);
+        slots.push(o[0], o[1], size, role, layer);
+        return true;
+    }
+
+    function wallBand(kLow, layerId, innerBand, layerIndex) {
+        var s1 = rowSpan(kLow), s2 = rowSpan(kLow + 1);
+        if (!s1 && !s2) return;
+        var lo = Math.min(s1 ? s1.lo : 1e9, s2 ? s2.lo : 1e9);
+        var hi = Math.max(s1 ? s1.hi : -1e9, s2 ? s2.hi : -1e9);
+        if (innerBand) { lo = Math.max(lo, ch.lo - 1); hi = Math.min(hi, ch.hi + 1); }
+        else if (layerIndex > 0 && hi - lo + 1 > width + 10) return; // the pass flares into a hall: skip the extra layer
+        function skip(p) { return !innerBand && layerIndex >= windowLayers && p >= wLo && p <= wHi; }
+        function roleAt(p) {
+            if (innerBand) return ROLE_WALL_INNER;
+            return (layerIndex < windowLayers && p >= wLo && p <= wHi) ? ROLE_WALL_WINDOW : ROLE_WALL;
+        }
+        for (var p = lo; p <= hi; p++) {
+            if (skip(p)) continue;
+            if (!skip(p + 1) && roleAt(p) === roleAt(p + 1)
+                && footprintOk(p, p + 1, kLow, kLow + 1)) {
+                markFootprint(p, p + 1, kLow, kLow + 1);
+                var o = originOf(p, p + 1, kLow, kLow + 1, 2);
+                slots.push(o[0], o[1], 2, roleAt(p), layerId);
+                continue;
+            }
+            for (var k = kLow; k <= kLow + 1; k++) {
+                if (!cellOk(p, k) || used[usedKey(p, k)]) continue;
+                used[usedKey(p, k)] = true;
+                var xy = chokePos(ch, p, k);
+                slots.push(xy[0], xy[1], 1, roleAt(p), layerId);
+            }
+        }
+    }
+
+    // spine + turret rows first (they claim their cells before walls tile the leftovers)
+    var kb = -3 - fs;
+    var spine = [];
+    var spineLo = 0, spineHi = -1;
+    var spanB = rowSpan(kb);
+    if (spanB) {
+        spineLo = Math.max(spanB.lo, p0 - 8);
+        spineHi = Math.min(spanB.hi, p0 + 8);
+        if ((spineHi - spineLo + 1) % 2 === 0) spineHi--;
+        if (spineHi - spineLo + 1 < 3) { spineLo = 0; spineHi = -1; }
+    }
+    for (var sp = spineLo; sp <= spineHi; sp++) {
+        var sxy = chokePos(ch, sp, kb);
+        spine.push(sxy[0], sxy[1]);
+        used[usedKey(sp, kb)] = true;
+    }
+    function rowSlots(size, kTop, role) {
+        var ps = [];
+        for (var p = spineLo; p + size - 1 <= spineHi; p += 4) ps.push(p);
+        ps.sort(function (a, b) {
+            return Math.abs(a + (size - 1) / 2 - p0) - Math.abs(b + (size - 1) / 2 - p0);
+        });
+        var idx = 0;
+        for (var i = 0; i < ps.length; i++) {
+            if (addBlock(ps[i], size, kTop, role, idx)) idx++;
+        }
+    }
+    if (spine.length) {
+        rowSlots(ms, kb - 1, ROLE_GROUND_TURRET);
+        rowSlots(fs, -3, ROLE_FRONT_TURRET);
+    }
+
+    // support row, power node, force + overdrive projectors
+    var supTop = kb - ms - 1;
+    var supIdx = 0;
+    if (spine.length) {
+        for (var q = spineLo + 2; q + ss - 1 <= spineHi; q += 4) {
+            if (addBlock(q, ss, supTop, ROLE_SUPPORT, supIdx)) supIdx++;
+        }
+    }
+    var powerK = supTop - ss;
+    addBlock(p0, 1, powerK, ROLE_POWER_NODE, 0);
+    if (opts.wantForce) addBlock(p0 - 1, 3, powerK - 1, ROLE_FORCE, 0);
+    if (opts.wantOverdrive) addBlock(p0 + 3, 2, powerK - 1, ROLE_OVERDRIVE, 0);
+
+    // walls: outer layers (flank thick, window thinner) then inner plastanium layer
+    for (var j = 0; j < flankLayers; j++) wallBand(2 * j, j, false, j);
+    if (opts.wantInner !== false) wallBand(-2, 100, true, 0);
+
+    return {
+        slots: slots, spine: spine, spineLen: spine.length / 2,
+        wLo: wLo, wHi: wHi, winW: winW, p0: p0, kb: kb,
+        flankLayers: flankLayers, windowLayers: windowLayers
+    };
+}
+
+/** Wall HP -> Mindustry ground flowfield step cost for enemy units (PathTile.health * 5 / 100). */
+function groundPathCostThroughWall(buildingHp) {
+    var healthField = Math.min(Math.floor(buildingHp / 40), 80);
+    return 1 + Math.floor(healthField * 5 / 100);
+}
+
+/**
+ * Verifies the kill-box funnel: returns the line coordinate p where the cheapest
+ * enemy ground route crosses the wall band (or null when it cannot cross).
+ */
+function killBoxCrossingP(w, h, passable, ch, slots, wallHp) {
+    var cost = fillArray(w * h, 0);
+    for (var i = 0; i < w * h; i++) cost[i] = passable[i] ? 10 : -1;
+    var wcost = groundPathCostThroughWall(wallHp) * 10;
+    for (var s = 0; s + 4 < slots.length; s += 5) {
+        var sx = slots[s], sy = slots[s + 1], size = slots[s + 2], role = slots[s + 3];
+        if (role === ROLE_POWER_NODE) continue;
+        var off = Math.floor((size - 1) / 2);
+        for (var dy = 0; dy < size; dy++) {
+            for (var dx = 0; dx < size; dx++) {
+                var cx = sx - off + dx, cy = sy - off + dy;
+                if (inBounds(w, h, cx, cy) && cost[cy * w + cx] > 0) cost[cy * w + cx] = wcost;
+            }
+        }
+    }
+    var a = chokePos(ch, ch.p0, 12), b = chokePos(ch, ch.p0, -16);
+    var n = w * h;
+    var d = fillArray(n, 1000000000), par = fillArray(n, -1), done = fillArray(n, 0);
+    var start = a[1] * w + a[0], goal = b[1] * w + b[0];
+    if (!inBounds(w, h, a[0], a[1]) || !inBounds(w, h, b[0], b[1]) || cost[start] < 0 || cost[goal] < 0) return null;
+    d[start] = 0;
+    // simple O(n log n)-free Dijkstra using bucket-less linear scan over a frontier list (maps are tiny in tests)
+    var frontier = [start];
+    while (frontier.length) {
+        var bi = 0;
+        for (var f = 1; f < frontier.length; f++) if (d[frontier[f]] < d[frontier[bi]]) bi = f;
+        var cur = frontier.splice(bi, 1)[0];
+        if (done[cur]) continue;
+        done[cur] = 1;
+        if (cur === goal) break;
+        var x = cur % w, y = (cur - x) / w;
+        for (var ey = -1; ey <= 1; ey++) {
+            for (var ex = -1; ex <= 1; ex++) {
+                if (!ex && !ey) continue;
+                var nx = x + ex, ny = y + ey;
+                if (!inBounds(w, h, nx, ny)) continue;
+                var ni = ny * w + nx;
+                if (cost[ni] < 0 || done[ni]) continue;
+                if (ex && ey && (cost[y * w + nx] < 0 || cost[ny * w + x] < 0)) continue;
+                var nd = d[cur] + cost[ni] * ((ex && ey) ? 1.4 : 1);
+                if (nd < d[ni]) { d[ni] = nd; par[ni] = cur; frontier.push(ni); }
+            }
+        }
+    }
+    if (!done[goal]) return null;
+    var crossings = [];
+    for (var c = goal; c !== -1; c = par[c]) {
+        var px = c % w, py = (c - px) / w;
+        var pp = ch.axis === 1 ? py : px;
+        var kk = ch.axis === 1 ? (px - ch.cx) * ch.fwd : (py - ch.cy) * ch.fwd;
+        if (kk === 0 || kk === 1) crossings.push(pp);
+    }
+    if (!crossings.length) return null;
+    var sum = 0;
+    for (var z = 0; z < crossings.length; z++) sum += crossings[z];
+    return sum / crossings.length;
+}
+
+// ------------------------------------------------------- anti-air umbrella
+
+/**
+ * Anti-air corridor on the straight air vector spawn -> core plus cover slots
+ * next to generator/reactor clusters. Returns flat triples [x, y, kind]
+ * (kind 0 = vector line, 1 = generator cover). Exact tiles are validated by the caller.
+ */
+function planAaCorridor(coreX, coreY, spawnX, spawnY, generators, opts) {
+    opts = opts || {};
+    var count = opts.count || 4;
+    var spacing = opts.spacing || 6;
+    var dx = spawnX - coreX, dy = spawnY - coreY;
+    var len = Math.sqrt(dx * dx + dy * dy);
+    if (len < 1e-3) return [];
+    var ux = dx / len, uy = dy / len;
+    var px = -uy, py = ux;
+    var dAa = Math.min(opts.distance || 16, Math.max(8, len * 0.4));
+    var cx = coreX + ux * dAa, cy = coreY + uy * dAa;
+    var out = [];
+    var offsets = [];
+    for (var i = 0; i < count; i++) offsets.push((i - (count - 1) / 2) * spacing);
+    offsets.sort(function (a, b) { return Math.abs(a) - Math.abs(b); });
+    for (var o = 0; o < offsets.length; o++) {
+        out.push(Math.round(cx + px * offsets[o]), Math.round(cy + py * offsets[o]), 0);
+    }
+    // generator clusters (greedy, 8 tile radius, at most 2 clusters)
+    var gens = generators || [];
+    var clusters = [];
+    for (var g = 0; g + 1 < gens.length; g += 2) {
+        var placed = false;
+        for (var c = 0; c < clusters.length; c++) {
+            if (distPointToPoint(gens[g], gens[g + 1], clusters[c].x, clusters[c].y) <= 8) {
+                clusters[c].n++;
+                placed = true;
+                break;
+            }
+        }
+        if (!placed) clusters.push({ x: gens[g], y: gens[g + 1], n: 1 });
+    }
+    clusters.sort(function (a, b) { return b.n - a.n; });
+    for (var k = 0; k < clusters.length && k < 2; k++) {
+        var gx = Math.round(clusters[k].x + ux * 4), gy = Math.round(clusters[k].y + uy * 4);
+        var dup = false;
+        for (var j = 0; j + 2 < out.length; j += 3) {
+            if (distPointToPoint(out[j], out[j + 1], gx, gy) < 3) { dup = true; break; }
+        }
+        if (!dup) out.push(gx, gy, 1);
+    }
+    return out;
+}
+
+// ------------------------------------------------------------ ammo logistics
+
+/** Preferred ammo per turret, best first. Names are Mindustry item names. */
+var TURRET_AMMO = {
+    "duo": ["silicon", "graphite", "copper"],
+    "scatter": ["metaglass", "lead", "scrap"],
+    "scorch": ["coal"],
+    "hail": ["silicon", "pyratite", "graphite"],
+    "salvo": ["thorium", "blast-compound", "silicon", "pyratite", "graphite", "copper"],
+    "ripple": ["plastanium", "blast-compound", "pyratite", "silicon", "graphite"],
+    "cyclone": ["surge-alloy", "plastanium", "blast-compound", "metaglass"],
+    "swarmer": ["surge-alloy", "blast-compound", "pyratite"],
+    "spectre": ["thorium", "pyratite", "graphite"],
+    "fuse": ["thorium", "titanium", "copper"],
+    "foreshadow": ["surge-alloy"]
+};
+
+/** Minimum core stock before an item may be used as turret ammo (keeps building reserves). */
+var AMMO_MIN_STOCK = {
+    "copper": 150, "lead": 120, "graphite": 120, "silicon": 200, "metaglass": 120,
+    "coal": 60, "scrap": 60, "pyratite": 120, "blast-compound": 120,
+    "plastanium": 250, "thorium": 250, "surge-alloy": 250, "titanium": 250
+};
+
+function turretAcceptsAmmo(turret, item) {
+    var list = TURRET_AMMO[turret];
+    if (!list) return false;
+    for (var i = 0; i < list.length; i++) if (list[i] === item) return true;
+    return false;
+}
+
+function ammoStockOk(item, stock, unlocked) {
+    if (unlocked && unlocked[item] === false) return false;
+    var need = AMMO_MIN_STOCK[item] || 100;
+    return (stock[item] || 0) >= need;
+}
+
+/** Best usable ammo for one turret. preferred (e.g. from the AI brain) wins when accepted and stocked. */
+function chooseAmmoItem(turret, stock, unlocked, preferred) {
+    var list = TURRET_AMMO[turret];
+    if (!list) return null;
+    if (preferred && turretAcceptsAmmo(turret, preferred) && ammoStockOk(preferred, stock, unlocked)) return preferred;
+    for (var i = 0; i < list.length; i++) {
+        if (ammoStockOk(list[i], stock, unlocked)) return list[i];
+    }
+    return null;
+}
+
+/** One item for a whole shared bus: accepted by as many turrets as possible, then best-ranked. */
+function chooseBusAmmo(turrets, stock, unlocked, preferred) {
+    var cands = {};
+    var t, i;
+    for (t = 0; t < turrets.length; t++) {
+        var list = TURRET_AMMO[turrets[t]] || [];
+        for (i = 0; i < list.length; i++) {
+            if (!cands[list[i]]) cands[list[i]] = { coverage: 0, rank: 0 };
+            cands[list[i]].coverage++;
+            cands[list[i]].rank += list.length - i;
+        }
+    }
+    var best = null, bestScore = -1;
+    var names = Object.keys(cands);
+    for (i = 0; i < names.length; i++) {
+        var nm = names[i];
+        if (!ammoStockOk(nm, stock, unlocked)) continue;
+        var score = cands[nm].coverage * 100 + cands[nm].rank + (nm === preferred ? 50 : 0);
+        if (score > bestScore) { bestScore = score; best = nm; }
+    }
+    return best;
+}
+
+/** First ladder turret that is available and accepts the bus ammo (or needs no ammo). */
+function pickTurretForAmmo(ladder, ammo, available) {
+    for (var i = 0; i < ladder.length; i++) {
+        var nm = ladder[i];
+        if (available && !available[nm]) continue;
+        if (!TURRET_AMMO[nm] || turretAcceptsAmmo(nm, ammo)) return nm;
+    }
+    return null;
+}
+
+/** Status-effect synergy of a liquid turret + ammo combination (bonus score and Russian explanation). */
+function statusSynergy(liquid, ammo) {
+    if (liquid === "cryofluid" && ammo === "blast-compound") return { bonus: 3, text: "заморозка + взрывчатка (шоковый раскол)" };
+    if (liquid === "cryofluid") return { bonus: 1, text: "заморозка замедляет волну" };
+    if ((liquid === "oil" || liquid === "slag") && ammo === "pyratite") return { bonus: 3, text: "масло/шлак + пиратит (горение)" };
+    if (liquid === "water" && (ammo === "arc" || ammo === "lancer")) return { bonus: 2, text: "вода + электричество (шок)" };
+    if (liquid === "water") return { bonus: 1, text: "вода тушит и замедляет" };
+    return { bonus: 0, text: "" };
+}
+
+/**
+ * Plans the ammo bus: Unloader (touching the core) -> feeder conveyor (BFS) ->
+ * alternating Router/Junction spine along the turret rows.
+ * cells: window grid (CELL_FREE / CELL_LANE are buildable); spine: [x,y,...].
+ * Returns { ok, reason, pieces: [x, y, type, rot, ...], feederLength }.
+ */
+function planAmmoBus(w, h, cells, unloader, spine) {
+    var res = { ok: false, reason: "", pieces: [], feederLength: 0 };
+    var n = spine.length / 2;
+    if (n % 2 === 0) n--;
+    if (n < 1) { res.reason = "нет места под шину"; return res; }
+    var i;
+    var buildable = function (x, y) {
+        if (!inBounds(w, h, x, y)) return false;
+        var c = cells[y * w + x];
+        return c === CELL_FREE || c === CELL_LANE;
+    };
+    var occupied = {};
+    for (i = 0; i < n; i++) {
+        if (!buildable(spine[i * 2], spine[i * 2 + 1])) { n = i; break; }
+    }
+    if (n % 2 === 0) n--;
+    if (n < 1) { res.reason = "шина упирается в препятствие"; return res; }
+    for (i = 0; i < n; i++) occupied[spine[i * 2] + "," + spine[i * 2 + 1]] = true;
+
+    var feeder = [];
+    var sx0 = spine[0], sy0 = spine[1];
+    if (unloader) {
+        if (!buildable(unloader.x, unloader.y)) { res.reason = "нет клетки под Unloader"; return res; }
+        occupied[unloader.x + "," + unloader.y] = true;
+        // BFS from the free neighbours of the unloader to any cell touching spine[0]
+        var prev = {}, queue = [];
+        for (var d = 0; d < 4; d++) {
+            var qx = unloader.x + DX[d], qy = unloader.y + DY[d];
+            var key = qx + "," + qy;
+            if (!buildable(qx, qy) || occupied[key] || prev[key] !== undefined) continue;
+            prev[key] = "start";
+            queue.push([qx, qy]);
+        }
+        var goalNode = null, head = 0;
+        while (head < queue.length) {
+            var cur = queue[head++];
+            for (var e = 0; e < 4; e++) {
+                if (cur[0] + DX[e] === sx0 && cur[1] + DY[e] === sy0) { goalNode = cur; break; }
+            }
+            if (goalNode) break;
+            for (var f = 0; f < 4; f++) {
+                var nx = cur[0] + DX[f], ny = cur[1] + DY[f];
+                var nk = nx + "," + ny;
+                if (!buildable(nx, ny) || occupied[nk] || prev[nk] !== undefined) continue;
+                prev[nk] = cur[0] + "," + cur[1];
+                queue.push([nx, ny]);
+            }
+        }
+        // unloader directly touches the spine start: no feeder required
+        var touches = false;
+        for (var t = 0; t < 4; t++) if (unloader.x + DX[t] === sx0 && unloader.y + DY[t] === sy0) touches = true;
+        if (!goalNode && !touches) { res.reason = "нет пути конвейера от Unloader к шине"; return res; }
+        if (goalNode) {
+            var chain = [];
+            var ck = goalNode[0] + "," + goalNode[1];
+            while (ck !== "start") {
+                var parts = ck.split(",");
+                chain.push([parseInt(parts[0], 10), parseInt(parts[1], 10)]);
+                ck = prev[ck];
+            }
+            chain.reverse();
+            for (var c = 0; c < chain.length; c++) {
+                var tx = c + 1 < chain.length ? chain[c + 1][0] : sx0;
+                var ty = c + 1 < chain.length ? chain[c + 1][1] : sy0;
+                var rot = 0;
+                for (var r = 0; r < 4; r++) if (chain[c][0] + DX[r] === tx && chain[c][1] + DY[r] === ty) rot = r;
+                feeder.push(chain[c][0], chain[c][1], BUS_CONVEYOR, rot);
+            }
+        }
+        res.pieces.push(unloader.x, unloader.y, BUS_UNLOADER, 0);
+    }
+    for (i = 0; i < feeder.length; i++) res.pieces.push(feeder[i]);
+    res.feederLength = feeder.length / 4;
+    for (i = 0; i < n; i++) {
+        res.pieces.push(spine[i * 2], spine[i * 2 + 1], i % 2 === 0 ? BUS_ROUTER : BUS_JUNCTION, 0);
+    }
+    res.ok = true;
+    return res;
+}
+
+/** Drill-fed variant: finds a drill + conveyor path ending at the spine start (treated as a core cell). */
+function planAmmoDrillFeed(w, h, cells, ore, itemIdx, size, spineX, spineY, maxPath) {
+    var copy = cells.slice();
+    copy[spineY * w + spineX] = CELL_CORE;
+    return findDrillSite(w, h, copy, ore, itemIdx, size, maxPath);
+}
+
+function rectTouchesCell(x0, y0, size, cx, cy) {
+    var inside = cx >= x0 && cx < x0 + size && cy >= y0 && cy < y0 + size;
+    if (inside) return false;
+    return cx >= x0 - 1 && cx <= x0 + size && cy >= y0 - 1 && cy <= y0 + size && (cx >= x0 && cx < x0 + size || cy >= y0 && cy < y0 + size);
+}
+
+// -------------------------------------------------------- reactor safety
+
+/**
+ * Thorium Reactor guard: never build without guaranteed cryofluid. Returns null
+ * when safe or a Russian reason when placement must be refused.
+ * s: { reactorUnlocked, mixerBuilt, mixerCryoFrac, waterOk, titaniumStock, thoriumStock, siteDistFromCore, powerNetPerSec }
+ */
+function reactorGuard(s) {
+    if (!s.reactorUnlocked) return "реактор не изучен";
+    if (!s.mixerBuilt) return "сначала Cryofluid Mixer: без охлаждения реактор взорвётся";
+    if (!s.waterOk) return "нет воды для криогенного миксера";
+    if ((s.titaniumStock || 0) < 80) return "мало титана для криожидкости";
+    if ((s.mixerCryoFrac || 0) < 0.5) return "криожидкость ещё не накоплена — жду";
+    if ((s.thoriumStock || 0) < 120) return "мало тория для топлива";
+    if (s.siteDistFromCore !== undefined && s.siteDistFromCore < 12) return "реактор слишком близко к ядру";
+    return null;
+}
+
+function reactorShouldCutFuel(heat, cryoFrac) {
+    return heat >= 0.45 && cryoFrac < 0.25;
+}
+
+/**
+ * Finds a reactor site away from the threat: 3x3 reactor + adjacent 2x2 cryofluid
+ * mixer + adjacent 2x2 water extractor (window coordinates, reactor by centre).
+ */
+function findReactorSite(w, h, cells, coreX, coreY, awayX, awayY, minDist, maxDist) {
+    var alen = Math.sqrt(awayX * awayX + awayY * awayY) || 1;
+    var ax = awayX / alen, ay = awayY / alen;
+    var rOff = sizeOffset(3);
+    // mixer (2x2) origin relative to the reactor centre for the four sides
+    var mixerRel = [[2, -1], [-1, 2], [-3, -1], [-1, -3]];
+    var extRel = [[2, 0], [0, 2], [-2, 0], [0, -2]];
+    var best = null, bestScore = -1e9;
+    for (var ry = 2; ry < h - 2; ry++) {
+        for (var rx = 2; rx < w - 2; rx++) {
+            var d = distPointToPoint(rx, ry, coreX, coreY);
+            if (d < minDist || d > maxDist) continue;
+            var dot = ((rx - coreX) * ax + (ry - coreY) * ay) / d;
+            if (dot > 0.35) continue; // never toward the enemy
+            if (!rectFree(w, h, cells, rx + rOff, ry + rOff, 3)) continue;
+            var found = false;
+            for (var side = 0; side < 4 && !found; side++) {
+                var mx0 = rx + mixerRel[side][0], my0 = ry + mixerRel[side][1];
+                if (!rectFree(w, h, cells, mx0, my0, 2)) continue;
+                for (var es = 0; es < 4 && !found; es++) {
+                    var ex0 = mx0 + extRel[es][0], ey0 = my0 + extRel[es][1];
+                    if (rectsOverlap(rx + rOff, ry + rOff, 3, ex0, ey0, 2)) continue;
+                    if (!rectFree(w, h, cells, ex0, ey0, 2)) continue;
+                    var score = -Math.abs(d - (minDist + 4)) - dot * 5;
+                    if (score > bestScore) {
+                        bestScore = score;
+                        best = { rx: rx, ry: ry, mx: mx0, my: my0, ex: ex0, ey: ey0, dist: d };
+                    }
+                    found = true;
+                }
+            }
+        }
+    }
+    return best;
+}
+
+// ------------------------------------------------------ recon: wave schedule
+
+/** Mindustry SpawnGroup.getSpawned semantics on a plain group description. */
+function waveGroupCount(g, wave) {
+    var spacing = g.spacing > 0 ? g.spacing : 1;
+    var begin = g.begin || 0, end = g.end === undefined || g.end < 0 ? 1e9 : g.end;
+    if (wave < begin || wave > end || (wave - begin) % spacing !== 0) return 0;
+    var scaling = g.scaling > 0 ? g.scaling : 1e9;
+    var count = (g.amount || 1) + Math.floor(Math.floor((wave - begin) / spacing) / scaling);
+    return Math.min(count, g.max === undefined ? 1e9 : g.max);
+}
+
+/**
+ * Reads the whole future wave table. groups: [{type, flying, begin, end, spacing, amount,
+ * scaling, max, boss, hp, dps, shield, shieldScaling}]. waveIdx = 0-based index of the next wave.
+ */
+function analyzeWaveSchedule(groups, waveIdx, horizon, maxScan) {
+    horizon = horizon || 5;
+    maxScan = maxScan || 150;
+    var rep = {
+        firstAirWave: -1, nextAirWave: -1, firstGroundWave: -1, bossWave: -1, bossType: "", bossFlying: false,
+        forecast: [], airShareNext: 0, airWaves: 0
+    };
+    var wave, gi;
+    for (wave = 0; wave < maxScan; wave++) {
+        var airHere = false, groundHere = false;
+        for (gi = 0; gi < groups.length; gi++) {
+            var g = groups[gi];
+            var c = waveGroupCount(g, wave);
+            if (c <= 0) continue;
+            if (g.flying) { airHere = true; } else { groundHere = true; }
+            if (g.boss && rep.bossWave < 0) {
+                rep.bossWave = wave + 1; rep.bossType = g.type; rep.bossFlying = !!g.flying;
+            }
+        }
+        if (airHere) {
+            rep.airWaves++;
+            if (rep.firstAirWave < 0) rep.firstAirWave = wave + 1;
+            if (rep.nextAirWave < 0 && wave >= waveIdx) rep.nextAirWave = wave + 1;
+        }
+        if (groundHere && rep.firstGroundWave < 0) rep.firstGroundWave = wave + 1;
+    }
+    var airHpSum = 0, hpSum = 0;
+    for (wave = waveIdx; wave < waveIdx + horizon && wave < maxScan + horizon; wave++) {
+        var f = { wave: wave + 1, count: 0, hp: 0, dps: 0, airCount: 0, airHp: 0, groundHp: 0, boss: false, types: [] };
+        for (gi = 0; gi < groups.length; gi++) {
+            var gg = groups[gi];
+            var cnt = waveGroupCount(gg, wave);
+            if (cnt <= 0) continue;
+            var shield = Math.max(0, (gg.shield || 0) + (gg.shieldScaling || 0) * (wave - (gg.begin || 0)));
+            var hp = cnt * ((gg.hp || 100) + shield);
+            f.count += cnt;
+            f.hp += hp;
+            f.dps += cnt * (gg.dps || 10);
+            if (gg.flying) { f.airCount += cnt; f.airHp += hp; } else { f.groundHp += hp; }
+            if (gg.boss) f.boss = true;
+            f.types.push(cnt + "x" + gg.type);
+        }
+        rep.forecast.push(f);
+        airHpSum += f.airHp;
+        hpSum += f.hp;
+    }
+    rep.airShareNext = hpSum > 0 ? airHpSum / hpSum : 0;
+    return rep;
+}
+
+// ----------------------------------------------------------- core zoning
+
+/**
+ * Zones around the core: ZONE_NUCLEUS = future 5x5 Core: Nucleus footprint (minus the
+ * current core), ZONE_LANE = three-wide conveyor corridors in the four cardinal
+ * directions so early buildings never wall the core in.
+ */
+function computeCoreZones(w, h, cx, cy, coreSize, laneLen) {
+    laneLen = laneLen || 12;
+    var zone = fillArray(w * h, ZONE_NONE);
+    var cOff = sizeOffset(coreSize);
+    var cx0 = cx + cOff, cy0 = cy + cOff;
+    var x, y;
+    for (var d = 1; d <= laneLen + 3; d++) {
+        for (var lane = -1; lane <= 1; lane++) {
+            var pts = [[cx + lane, cy + 2 + d], [cx + lane, cy - 2 - d], [cx + 2 + d, cy + lane], [cx - 2 - d, cy + lane]];
+            for (var q = 0; q < 4; q++) {
+                x = pts[q][0]; y = pts[q][1];
+                if (inBounds(w, h, x, y)) zone[y * w + x] = ZONE_LANE;
+            }
+        }
+    }
+    for (y = cy - 2; y <= cy + 2; y++) {
+        for (x = cx - 2; x <= cx + 2; x++) {
+            if (!inBounds(w, h, x, y)) continue;
+            if (x >= cx0 && x < cx0 + coreSize && y >= cy0 && y < cy0 + coreSize) continue;
+            zone[y * w + x] = ZONE_NUCLEUS;
+        }
+    }
+    return zone;
+}
+
+function zoneAllows(zone, kind) {
+    if (zone === ZONE_NUCLEUS) return kind <= KIND_LOGISTICS;
+    if (zone === ZONE_LANE) return kind === KIND_CONVEYOR;
+    return true;
+}
+
+// ------------------------------------------------- after-action heat map
+
+/** Damage heat map by 4x4 tile buckets, with air/ground attribution. */
+function createDamageHeat() {
+    var heat = { buckets: {}, total: 0, air: 0, ground: 0 };
+    heat.record = function (x, y, amount, air) {
+        if (!(amount > 0)) return;
+        var key = Math.floor(x / 4) + "," + Math.floor(y / 4);
+        var b = heat.buckets[key];
+        if (!b) { b = { x: Math.floor(x / 4) * 4 + 2, y: Math.floor(y / 4) * 4 + 2, amount: 0, air: 0 }; heat.buckets[key] = b; }
+        b.amount += amount;
+        if (air) { b.air += amount; heat.air += amount; } else heat.ground += amount;
+        heat.total += amount;
+    };
+    heat.hottest = function (n) {
+        var arr = [];
+        var keys = Object.keys(heat.buckets);
+        for (var i = 0; i < keys.length; i++) arr.push(heat.buckets[keys[i]]);
+        arr.sort(function (a, b) { return b.amount - a.amount; });
+        return arr.slice(0, n);
+    };
+    heat.dominantFlank = function (coreX, coreY) {
+        var acc = {};
+        var keys = Object.keys(heat.buckets);
+        var best = "any", bestV = 0;
+        for (var i = 0; i < keys.length; i++) {
+            var b = heat.buckets[keys[i]];
+            var f = compassFlank(b.x - coreX, b.y - coreY);
+            acc[f] = (acc[f] || 0) + b.amount;
+            if (acc[f] > bestV) { bestV = acc[f]; best = f; }
+        }
+        return best;
+    };
+    heat.airShare = function () { return heat.total > 0 ? heat.air / heat.total : 0; };
+    heat.reset = function () { heat.buckets = {}; heat.total = 0; heat.air = 0; heat.ground = 0; };
+    return heat;
+}
+
+/** After-action decision: where and how to reinforce (null when the wave did no meaningful damage). */
+function pickBreachReinforcement(heat, coreX, coreY, minTotal) {
+    if (!heat || heat.total < (minTotal || 600)) return null;
+    var top = heat.hottest(1);
+    if (!top.length) return null;
+    var air = heat.airShare() >= 0.5;
+    return {
+        x: top[0].x, y: top[0].y, air: air, amount: top[0].amount,
+        flank: heat.dominantFlank(coreX, coreY), airShare: heat.airShare()
+    };
+}
+
+// --------------------------------------------- danger map & flank routing
+
+/** Enemy turret danger grid. threats: [{x, y, r (tiles), weight}] -> int danger per tile (0 = safe). */
+function buildDangerGrid(w, h, threats) {
+    var danger = fillArray(w * h, 0);
+    for (var t = 0; t < threats.length; t++) {
+        var th = threats[t];
+        var r = Math.ceil(th.r);
+        for (var y = Math.max(0, Math.floor(th.y) - r); y <= Math.min(h - 1, Math.floor(th.y) + r); y++) {
+            for (var x = Math.max(0, Math.floor(th.x) - r); x <= Math.min(w - 1, Math.floor(th.x) + r); x++) {
+                var d = distPointToPoint(x, y, th.x, th.y);
+                if (d > th.r) continue;
+                danger[y * w + x] += Math.round((th.weight || 1) * (6 + 6 * (1 - d / th.r)));
+            }
+        }
+    }
+    return danger;
+}
+
+function straightPathDanger(w, h, danger, sx, sy, gx, gy) {
+    var steps = Math.max(1, Math.ceil(distPointToPoint(sx, sy, gx, gy)));
+    var sum = 0;
+    for (var i = 0; i <= steps; i++) {
+        var x = Math.round(sx + (gx - sx) * i / steps), y = Math.round(sy + (gy - sy) * i / steps);
+        if (inBounds(w, h, x, y)) sum += danger[y * w + x];
+    }
+    return sum;
+}
+
+/**
+ * Danger-aware route on a coarse grid (step tiles). passable may be null for air units.
+ * Returns { waypoints:[x,y,...], danger, directDanger, length, directLength, useFlank }.
+ */
+function planFlankRoute(w, h, danger, passable, sx, sy, gx, gy, opts) {
+    opts = opts || {};
+    var step = opts.step || 3;
+    var dangerK = opts.dangerK === undefined ? 0.8 : opts.dangerK;
+    var cw = Math.ceil(w / step), ch = Math.ceil(h / step);
+    var directDanger = straightPathDanger(w, h, danger, sx, sy, gx, gy);
+    var directLength = distPointToPoint(sx, sy, gx, gy);
+    var res = { waypoints: [gx, gy], danger: directDanger, directDanger: directDanger, length: directLength, directLength: directLength, useFlank: false };
+    function cellX(i) { return Math.min(w - 1, i * step + (step >> 1)); }
+    function cellY(j) { return Math.min(h - 1, j * step + (step >> 1)); }
+    var si = Math.min(cw - 1, Math.floor(sx / step)), sj = Math.min(ch - 1, Math.floor(sy / step));
+    var gi2 = Math.min(cw - 1, Math.floor(gx / step)), gj = Math.min(ch - 1, Math.floor(gy / step));
+    var n = cw * ch;
+    var dist = fillArray(n, 1e18), par = fillArray(n, -1), done = fillArray(n, 0);
+    var open = [];
+    var s0 = sj * cw + si, g0 = gj * cw + gi2;
+    dist[s0] = 0;
+    open.push([0, s0]);
+    function heapPush(item) {
+        open.push(item);
+        var i = open.length - 1;
+        while (i > 0) {
+            var p = (i - 1) >> 1;
+            if (open[p][0] <= open[i][0]) break;
+            var t = open[p]; open[p] = open[i]; open[i] = t; i = p;
+        }
+    }
+    function heapPop() {
+        var top = open[0], last = open.pop();
+        if (open.length) {
+            open[0] = last;
+            var i = 0;
+            for (;;) {
+                var l = 2 * i + 1, r = l + 1, m = i;
+                if (l < open.length && open[l][0] < open[m][0]) m = l;
+                if (r < open.length && open[r][0] < open[m][0]) m = r;
+                if (m === i) break;
+                var t = open[m]; open[m] = open[i]; open[i] = t; i = m;
+            }
+        }
+        return top;
+    }
+    open = [[0, s0]];
+    while (open.length) {
+        var cur = heapPop()[1];
+        if (done[cur]) continue;
+        done[cur] = 1;
+        if (cur === g0) break;
+        var ci = cur % cw, cj = (cur - ci) / cw;
+        for (var dy = -1; dy <= 1; dy++) {
+            for (var dx = -1; dx <= 1; dx++) {
+                if (!dx && !dy) continue;
+                var ni = ci + dx, nj = cj + dy;
+                if (ni < 0 || nj < 0 || ni >= cw || nj >= ch) continue;
+                var nn = nj * cw + ni;
+                if (done[nn]) continue;
+                var px = cellX(ni), py = cellY(nj);
+                if (passable && nn !== g0 && !passable[py * w + px]) continue;
+                var stepLen = step * ((dx && dy) ? 1.414 : 1);
+                var nd = dist[cur] + stepLen + danger[py * w + px] * dangerK;
+                if (nd < dist[nn]) { dist[nn] = nd; par[nn] = cur; heapPush([nd, nn]); }
+            }
+        }
+    }
+    if (!done[g0]) return res;
+    var cellsPath = [];
+    for (var c = g0; c !== -1; c = par[c]) cellsPath.push(c);
+    cellsPath.reverse();
+    var pts = [];
+    var routeDanger = 0, length = 0, lx = sx, ly = sy;
+    for (var q = 0; q < cellsPath.length; q++) {
+        var qi = cellsPath[q] % cw, qj = (cellsPath[q] - qi) / cw;
+        var wx = q === cellsPath.length - 1 ? gx : cellX(qi), wy = q === cellsPath.length - 1 ? gy : cellY(qj);
+        routeDanger += danger[Math.min(h - 1, wy) * w + Math.min(w - 1, wx)];
+        length += distPointToPoint(lx, ly, wx, wy);
+        lx = wx; ly = wy;
+        pts.push(wx, wy);
+    }
+    // thin out waypoints: keep a point only where the heading changes or after >= 8 tiles
+    var thin = [];
+    var lastX = sx, lastY = sy, lastDirX = 0, lastDirY = 0;
+    for (var k = 0; k + 1 < pts.length; k += 2) {
+        var ddx = pts[k] - lastX, ddy = pts[k + 1] - lastY;
+        var dl = Math.sqrt(ddx * ddx + ddy * ddy) || 1;
+        var ux = ddx / dl, uy = ddy / dl;
+        var turned = Math.abs(ux - lastDirX) + Math.abs(uy - lastDirY) > 0.5;
+        if (k + 2 >= pts.length || (turned && dl >= 4) || dl >= 24) {
+            thin.push(pts[k], pts[k + 1]);
+            lastX = pts[k]; lastY = pts[k + 1]; lastDirX = ux; lastDirY = uy;
+        }
+    }
+    if (!thin.length) thin = [gx, gy];
+    res.waypoints = thin;
+    res.danger = routeDanger;
+    res.length = length;
+    res.useFlank = directDanger > 0 && routeDanger < directDanger * 0.6 && length <= directLength * 2.4;
+    if (!res.useFlank) res.waypoints = [gx, gy];
+    return res;
+}
+
+// ---------------------------------------------------- assault target priority
+
+var ASSAULT_BASE_SCORE = {
+    "generator": 100, "power-node": 95, "battery": 85, "ammo-feed": 80,
+    "turret": 50, "factory": 40, "core": 20, "other": 5
+};
+
+/**
+ * Picks the next assault target: power first, then ammo logistics ("blind and
+ * disarm" the base), turrets, and the core only when the base is disarmed.
+ * cands: [{kind, x, y, powered}] ; ref: {x, y} (our rally point);
+ * st: {turrets, disarmed} counts of enemy turrets and how many are unpowered/empty.
+ */
+function pickAssaultTarget(cands, ref, st) {
+    var best = -1, bestScore = -1e9;
+    var disarmedFrac = st && st.turrets > 0 ? st.disarmed / st.turrets : 1;
+    var anyNonCore = false, i;
+    for (i = 0; i < cands.length; i++) if (cands[i].kind !== "core") anyNonCore = true;
+    for (i = 0; i < cands.length; i++) {
+        var c = cands[i];
+        var base = ASSAULT_BASE_SCORE[c.kind];
+        if (base === undefined) base = 5;
+        if (c.kind === "core" && anyNonCore && disarmedFrac < 0.7) continue;
+        if (c.kind === "turret" && c.powered === false) continue; // already disarmed
+        var score = base - distPointToPoint(c.x, c.y, ref.x, ref.y) * 0.3;
+        if (score > bestScore) { bestScore = score; best = i; }
+    }
+    if (best < 0) {
+        for (i = 0; i < cands.length; i++) if (cands[i].kind === "core") return i;
+    }
+    return best;
+}
+
+/** Wounded units (<45% HP) retreat to the repair point and return only above 85%. */
+function splitSquadByHealth(units, retreating) {
+    var fight = [], retreat = [];
+    for (var i = 0; i < units.length; i++) {
+        var u = units[i];
+        var wasRetreating = !!retreating[u.id];
+        var go = wasRetreating ? u.hpFrac < 0.85 : u.hpFrac < 0.45;
+        if (go) retreat.push(u.id); else fight.push(u.id);
+    }
+    return { fight: fight, retreat: retreat };
+}
+
+// ------------------------------------------------- unit lines (T1..T5 chains)
+
+var UNIT_LINES = {
+    "ground": ["dagger", "mace", "fortress", "scepter", "reign"],
+    "air": ["flare", "horizon", "zenith", "antumbra", "eclipse"],
+    "naval": ["risso", "minke", "bryde", "sei", "omura"],
+    "legs": ["crawler", "atrax", "spiroct", "arkyid", "toxopid"],
+    "support": ["nova", "pulsar", "quasar", "vela", "corvus"]
+};
+var UNIT_LINE_FACTORY = { "ground": "ground-factory", "legs": "ground-factory", "support": "ground-factory", "air": "air-factory", "naval": "naval-factory" };
+var RECONSTRUCTOR_BY_TIER = [null, null, "additive-reconstructor", "multiplicative-reconstructor", "exponential-reconstructor", "tetrative-reconstructor"];
+
+/**
+ * Chooses the best unit line the bot can fully produce.
+ * unlocked: {unitName: bool, blockName: bool}. Heavy sectors (diff >= 8) aim for T5.
+ */
+function chooseUnitLine(diff, unlocked, preferAir, hasWater) {
+    var order = preferAir ? ["air", "ground", "support", "legs", "naval"] : ["ground", "air", "support", "legs", "naval"];
+    var wantTier = diff >= 8 ? 5 : diff >= 6 ? 4 : diff >= 4 ? 3 : 2;
+    var best = null;
+    for (var o = 0; o < order.length; o++) {
+        var key = order[o];
+        if (key === "naval" && !hasWater) continue;
+        var units = UNIT_LINES[key];
+        var factory = UNIT_LINE_FACTORY[key];
+        if (!unlocked[factory] || !unlocked[units[0]]) continue;
+        var tiers = 1;
+        for (var t = 2; t <= wantTier; t++) {
+            if (!unlocked[units[t - 1]] || !unlocked[RECONSTRUCTOR_BY_TIER[t]]) break;
+            tiers = t;
+        }
+        if (!best || tiers > best.tiers) best = { line: key, tiers: tiers, chain: units.slice(0, tiers), factory: factory, wantTier: wantTier };
+        if (best.tiers >= wantTier) break;
+    }
+    return best;
+}
+
+var CHAIN_SIZES = [3, 3, 5, 7, 9];
+/**
+ * Factory + up to four reconstructor tiers on one axis (payload passes along adjacent blocks);
+ * a 3x3 PayloadConveyor spacer links Exponential -> Tetrative (T5).
+ * Returns the slot or null; positions are block centres in window coordinates.
+ */
+function findUnitChainSlotTiers(w, h, cells, coreWinX, coreWinY, allowUnloader, tiers) {
+    tiers = Math.max(1, Math.min(5, tiers));
+    var fOff = sizeOffset(3);
+    for (var pass = allowUnloader ? 0 : 1; pass <= 1; pass++) {
+        for (var r = 3; r <= 15; r++) {
+            for (var fy = coreWinY - r; fy <= coreWinY + r; fy++) {
+                for (var fx = coreWinX - r; fx <= coreWinX + r; fx++) {
+                    if (Math.max(Math.abs(fx - coreWinX), Math.abs(fy - coreWinY)) !== r) continue;
+                    var fx0 = fx + fOff, fy0 = fy + fOff;
+                    if (!rectFree(w, h, cells, fx0, fy0, 3)) continue;
+                    var ux = -1, uy = -1;
+                    if (pass === 0) {
+                        var uCell = findUnloaderCell(w, h, cells, fx0, fy0, 3);
+                        if (uCell < 0) continue;
+                        ux = uCell % w; uy = Math.floor(uCell / w);
+                    }
+                    for (var rot = 0; rot < 4; rot++) {
+                        var stages = [{ cx: fx, cy: fy, size: 3, kind: "factory" }];
+                        var cxp = fx, cyp = fy, prevHalf = 1, ok = true;
+                        for (var t = 2; t <= tiers && ok; t++) {
+                            var size = CHAIN_SIZES[t - 1];
+                            var half = (size - 1) / 2;
+                            if (t === 5) {
+                                // payload conveyor spacer between T4 and T5
+                                cxp += DX[rot] * (prevHalf + 1 + 1); cyp += DY[rot] * (prevHalf + 1 + 1);
+                                stages.push({ cx: cxp, cy: cyp, size: 3, kind: "payload" });
+                                prevHalf = 1;
+                            }
+                            cxp += DX[rot] * (prevHalf + 1 + half); cyp += DY[rot] * (prevHalf + 1 + half);
+                            stages.push({ cx: cxp, cy: cyp, size: size, kind: RECONSTRUCTOR_BY_TIER[t] });
+                            prevHalf = half;
+                        }
+                        for (var s = 1; s < stages.length && ok; s++) {
+                            var so = sizeOffset(stages[s].size);
+                            var rx0 = stages[s].cx + so, ry0 = stages[s].cy + so;
+                            if (!rectFree(w, h, cells, rx0, ry0, stages[s].size)) ok = false;
+                            else if (ux >= 0 && ux >= rx0 && ux < rx0 + stages[s].size && uy >= ry0 && uy < ry0 + stages[s].size) ok = false;
+                        }
+                        if (!ok) continue;
+                        var last = stages[stages.length - 1];
+                        var exitX = last.cx + DX[rot] * (Math.floor(last.size / 2) + 1);
+                        var exitY = last.cy + DY[rot] * (Math.floor(last.size / 2) + 1);
+                        if (!inBounds(w, h, exitX, exitY) || cells[exitY * w + exitX] !== CELL_FREE) continue;
+                        if (exitX === ux && exitY === uy) continue;
+                        return { rotation: rot, stages: stages, hasUnloader: ux >= 0, unloaderX: ux, unloaderY: uy, exitX: exitX, exitY: exitY, tiers: tiers };
+                    }
+                }
+            }
+        }
+    }
+    return null;
+}
+
+// =========================================================================
+// v2.0 "strategic brain": Gemma 4 E2B (gemma4:e2b) over local Ollama with an
+// instant deterministic human-like fallback planner.
+// =========================================================================
+
+var LLM_DEFAULT_URL = "http://127.0.0.1:11434/api/chat";
+var LLM_DEFAULT_MODEL = "gemma4:e2b";
+var LLM_INTERVAL_SEC = 10;
+var LLM_TIMEOUT_MS = 4000;
+var LLM_PLAN_TTL_SEC = 60;
+var PREF_LLM_ENABLED = "scb-llm-enabled";
+var PREF_LLM_URL = "scb-llm-url";
+var PREF_LLM_MODEL = "scb-llm-model";
+
+var LLM_PLANS = [
+    "BUILD_CHOKEPOINT_FORTRESS", "BUILD_AA_SHIELD", "BUILD_AMMO_BUS", "EXPAND_ECONOMY",
+    "EXPAND_SILICON_ECONOMY", "BUILD_POWER", "REINFORCE_BREACH", "BUILD_T3_AIR_FLANK",
+    "BUILD_ARMY", "SNIPE_ENEMY_POWER", "ASSAULT_BASE", "HOLD_AND_RESEARCH", "CALL_WAVE_EARLY"
+];
+var LLM_FLANKS = ["north", "north-east", "east", "south-east", "south", "south-west", "west", "north-west", "any"];
+var LLM_AMMO = [
+    "copper", "lead", "graphite", "silicon", "metaglass", "coal", "scrap", "pyratite",
+    "blast-compound", "plastanium", "thorium", "surge-alloy", "titanium"
+];
+
+/** Extracts the first balanced {...} object from arbitrary text (string-aware), or null. */
+function extractJsonObject(text) {
+    if (typeof text !== "string") return null;
+    var start = text.indexOf("{");
+    while (start >= 0) {
+        var depth = 0, inStr = false, esc = false;
+        for (var i = start; i < text.length; i++) {
+            var c = text.charAt(i);
+            if (inStr) {
+                if (esc) esc = false;
+                else if (c === "\\") esc = true;
+                else if (c === "\"") inStr = false;
+                continue;
+            }
+            if (c === "\"") inStr = true;
+            else if (c === "{") depth++;
+            else if (c === "}") {
+                depth--;
+                if (depth === 0) return text.substring(start, i + 1);
+            }
+        }
+        start = text.indexOf("{", start + 1);
+    }
+    return null;
+}
+
+function tryParseJson(text) {
+    try { return JSON.parse(text); } catch (e) { return null; }
+}
+
+function sanitizeThought(s) {
+    if (typeof s !== "string") return "";
+    var out = s.replace(/[\u0000-\u001f\u007f]+/g, " ").replace(/\[/g, "(").replace(/\]/g, ")").replace(/\s+/g, " ");
+    out = out.replace(/^\s+|\s+$/g, "");
+    if (out.length > 170) out = out.substring(0, 167) + "...";
+    return out;
+}
+
+function normalizeFlank(v) {
+    if (typeof v !== "string") return "any";
+    var s = v.toLowerCase().replace(/[\s_]+/g, "-").replace(/^\s+|\s+$/g, "");
+    var alias = { "n": "north", "ne": "north-east", "e": "east", "se": "south-east", "s": "south", "sw": "south-west", "w": "west", "nw": "north-west", "northeast": "north-east", "northwest": "north-west", "southeast": "south-east", "southwest": "south-west" };
+    if (alias[s]) s = alias[s];
+    for (var i = 0; i < LLM_FLANKS.length; i++) if (LLM_FLANKS[i] === s) return s;
+    return "any";
+}
+
+function normalizeAmmo(v) {
+    if (typeof v !== "string") return "";
+    var s = v.replace(/([a-z])([A-Z])/g, "$1-$2").toLowerCase().replace(/[\s_]+/g, "-");
+    if (s === "blast" || s === "blastcompound") s = "blast-compound";
+    if (s === "surge" || s === "surgealloy") s = "surge-alloy";
+    for (var i = 0; i < LLM_AMMO.length; i++) if (LLM_AMMO[i] === s) return s;
+    return "";
+}
+
+/**
+ * Parses an Ollama (/api/chat, /api/generate) or OpenAI-compatible response, or the bare
+ * JSON plan itself. Never throws. Returns { ok, thought, priority, flank, ammo, aggression, error }.
+ */
+function parseLlmResponse(raw) {
+    var fail = function (why) { return { ok: false, thought: "", priority: "", flank: "any", ammo: "", aggression: 0.5, error: why }; };
+    if (typeof raw !== "string" || !raw.replace(/\s+/g, "").length) return fail("пустой ответ");
+    var outerText = extractJsonObject(raw);
+    var content = null;
+    var outer = outerText ? tryParseJson(outerText) : null;
+    if (outer && typeof outer === "object") {
+        if (outer.message && typeof outer.message.content === "string") content = outer.message.content;
+        else if (typeof outer.response === "string") content = outer.response;
+        else if (outer.choices && outer.choices.length && outer.choices[0] && outer.choices[0].message
+            && typeof outer.choices[0].message.content === "string") content = outer.choices[0].message.content;
+        else if (typeof outer.priority === "string") content = outerText; // already the plan
+    }
+    if (content === null) return fail("битый JSON ответа");
+    var innerText = extractJsonObject(content);
+    var plan = innerText ? tryParseJson(innerText) : null;
+    if (!plan || typeof plan !== "object") return fail("нет JSON-плана в ответе модели");
+    var pr = typeof plan.priority === "string" ? plan.priority.replace(/^\s+|\s+$/g, "").toUpperCase().replace(/[\s-]+/g, "_") : "";
+    var known = false;
+    for (var i = 0; i < LLM_PLANS.length; i++) if (LLM_PLANS[i] === pr) known = true;
+    if (!known) return fail("неизвестный priority: " + pr);
+    var ag = typeof plan.aggression === "number" ? plan.aggression : parseFloat(plan.aggression);
+    if (isNaN(ag)) ag = 0.5;
+    ag = Math.max(0, Math.min(1, ag));
+    return {
+        ok: true, thought: sanitizeThought(plan.thought), priority: pr, flank: normalizeFlank(plan.flank),
+        ammo: normalizeAmmo(plan.ammo), aggression: ag, error: ""
+    };
+}
+
+function fmtNum(v) {
+    if (v === undefined || v === null || isNaN(v)) return "0";
+    return String(Math.round(v * 10) / 10);
+}
+
+/** Compact (< 600 tokens) English situation summary; the model answers in strict JSON. */
+function buildLlmPrompt(sit) {
+    var it = sit.items || {}, inc = sit.income || {};
+    var lines = [];
+    lines.push("Mindustry campaign bot. Reply ONLY JSON: {\"thought\":\"<=140 chars, Russian\",\"priority\":\"PLAN\",\"flank\":\"north|north-east|east|south-east|south|south-west|west|north-west|any\",\"ammo\":\"item or none\",\"aggression\":0.0-1.0}");
+    lines.push("PLANS: " + LLM_PLANS.join(","));
+    lines.push("SECTOR: " + (sit.attackMode ? "attack" : "survival") + " " + (sit.sectorName || "?") + " wave " + (sit.wave || 0) + "/" + (sit.winWave || 0) + " enemies " + (sit.enemies || 0) + " core " + (sit.coreName || "shard"));
+    lines.push("ITEMS: cu " + (it.copper || 0) + " pb " + (it.lead || 0) + " graphite " + (it.graphite || 0) + " si " + (it.silicon || 0) + " ti " + (it.titanium || 0) + " th " + (it.thorium || 0) + " plast " + (it.plastanium || 0) + " metaglass " + (it.metaglass || 0));
+    lines.push("INCOME/s: cu " + fmtNum(inc.copper) + " pb " + fmtNum(inc.lead) + " graphite " + fmtNum(inc.graphite) + " si " + fmtNum(inc.silicon) + " ti " + fmtNum(inc.titanium) + " | POWER " + fmtNum(sit.power) + "/s");
+    var fc = sit.forecast;
+    if (fc && fc.forecast) {
+        var parts = [];
+        for (var i = 0; i < fc.forecast.length && i < 5; i++) {
+            var f = fc.forecast[i];
+            parts.push("w" + f.wave + ":" + (f.types.length ? f.types.join("+") : "none") + (f.airCount > 0 ? "(air " + f.airCount + ")" : ""));
+        }
+        lines.push("FORECAST: " + parts.join(" "));
+        lines.push("FIRST_AIR_WAVE: " + fc.firstAirWave + " NEXT_AIR: " + fc.nextAirWave + " BOSS: " + (fc.bossWave > 0 ? "w" + fc.bossWave + " " + fc.bossType + (fc.bossFlying ? " flying" : " ground") : "none"));
+    }
+    lines.push("CHOKES: " + (sit.chokeCount || 0) + (sit.chokeCount ? " (width " + sit.chokeWidth + " at " + Math.round(sit.chokeDist) + " tiles, " + sit.chokeFlank + ")" : "") + " WEAK_FLANK: " + (sit.weakFlank || "none") + (sit.breach ? " BREACH " + (sit.breach.air ? "air" : "ground") + " " + sit.breach.flank : ""));
+    lines.push("HAVE: fortress " + (sit.fortressBuilt ? "yes" : "no") + " aa " + (sit.aaBuilt ? "yes" : "no") + " ammo_bus " + (sit.busBuilt ? "yes" : "no") + " turrets " + (sit.turrets || 0) + " dps " + Math.round(sit.defenseDps || 0) + " army " + (sit.armyUnits || 0));
+    lines.push("TURRETS_UNLOCKED: " + ((sit.turretsAvailable || []).join(",") || "none"));
+    if (sit.attackMode) lines.push("ENEMY_BASE: " + (sit.enemyBaseKnown ? "scouted" : "unknown") + " power_nodes " + (sit.enemyPowerNodes || 0));
+    return lines.join("\n");
+}
+
+var LLM_SYSTEM_PROMPT = "You are an expert Mindustry player. Think like a human pro: chokepoint kill-boxes, layered walls, automatic ammo belts, anti-air near generators, never rush. Answer with one JSON object only.";
+
+function buildLlmRequestBody(model, prompt) {
+    return JSON.stringify({
+        model: model,
+        messages: [{ role: "system", content: LLM_SYSTEM_PROMPT }, { role: "user", content: prompt }],
+        stream: false,
+        format: "json",
+        options: { temperature: 0.3, num_predict: 220 }
+    });
+}
+
+/** Can the plan actually be executed right now? The model must never break the bot. */
+function planFeasible(priority, sit) {
+    switch (priority) {
+        case "BUILD_CHOKEPOINT_FORTRESS": return (sit.turretsAvailable || []).length > 0;
+        case "BUILD_AA_SHIELD": return !!sit.aaAvailable;
+        case "BUILD_AMMO_BUS": return !!sit.busPossible;
+        case "EXPAND_SILICON_ECONOMY": return !!sit.smelterAvailable;
+        case "BUILD_T3_AIR_FLANK": return !!sit.airChainAvailable;
+        case "BUILD_ARMY": return !!sit.armyPossible;
+        case "SNIPE_ENEMY_POWER": return !!sit.attackMode && !!sit.enemyBaseKnown;
+        case "ASSAULT_BASE": return !!sit.attackMode;
+        case "CALL_WAVE_EARLY": return !sit.attackMode && !!sit.canCallWave;
+        case "REINFORCE_BREACH": return !!sit.breach;
+        default: return true;
+    }
+}
+
+/** Deterministic "pro player" planner. Always instant; explains itself in Russian. */
+function heuristicPlan(sit) {
+    var fc = sit.forecast || { nextAirWave: -1, firstAirWave: -1, bossWave: -1, airShareNext: 0, forecast: [] };
+    var wave = sit.wave || 1;
+    var turrets = sit.turrets || 0;
+    var priority = "HOLD_AND_RESEARCH", thought = "";
+    var flank = (sit.breach && sit.breach.flank) || sit.weakFlank || sit.chokeFlank || "any";
+    var aggression = 0.35;
+    var airSoon = fc.nextAirWave > 0 && fc.nextAirWave - wave <= 2;
+    var items = sit.items || {};
+    if (sit.breach) {
+        priority = "REINFORCE_BREACH";
+        thought = "Волна пробила " + sit.breach.flank + " фланг (" + Math.round(sit.breach.amount) + " урона) — усиливаю "
+            + (sit.breach.air ? "ПВО" : "стены и огневую точку") + " именно там.";
+        aggression = 0.15;
+    } else if (sit.attackMode && sit.enemyBaseKnown && sit.enemyPowerNodes > 0 && (sit.armyUnits || 0) >= 4) {
+        priority = "SNIPE_ENEMY_POWER";
+        thought = "У врага " + sit.enemyPowerNodes + " энергоузлов/генераторов — обхожу по флангу и обесточиваю базу, потом бью ядро.";
+        aggression = 0.8;
+    } else if (sit.attackMode && sit.enemyBaseKnown && (sit.armyUnits || 0) >= 8) {
+        priority = "ASSAULT_BASE";
+        thought = "Армия собрана (" + sit.armyUnits + ") — иду на штурм в обход дальнобойных турелей.";
+        aggression = 0.85;
+    } else if (sit.aaAvailable && !sit.aaBuilt && airSoon) {
+        priority = "BUILD_AA_SHIELD";
+        thought = "На волне " + fc.nextAirWave + " прилетит авиация, а ПВО нет — ставлю Scatter на воздушном векторе и прикрываю генераторы.";
+        aggression = 0.2;
+    } else if (!sit.fortressBuilt && (sit.turretsAvailable || []).length > 0 && sit.chokeCount > 0) {
+        priority = "BUILD_CHOKEPOINT_FORTRESS";
+        thought = "Нашёл горлышко шириной " + sit.chokeWidth + " в " + Math.round(sit.chokeDist) + " тайлах от ядра (" + sit.chokeFlank
+            + ") — перекрою скала-в-скалу и оставлю приманку-окно под перекрёстный огонь.";
+        aggression = 0.25;
+    } else if (!sit.fortressBuilt && (sit.turretsAvailable || []).length > 0 && turrets < 4) {
+        priority = "BUILD_CHOKEPOINT_FORTRESS";
+        thought = "Узких проходов нет — ставлю укрепрайон у ядра в сторону врага, пока волны слабые.";
+        aggression = 0.25;
+    } else if (sit.busPossible && !sit.busBuilt && turrets >= 3) {
+        priority = "BUILD_AMMO_BUS";
+        thought = "Турелей " + turrets + ", а патроны ношу руками — тяну шину Router+Junction от Unloader, чтобы не бегать.";
+        aggression = 0.3;
+    } else if (sit.smelterAvailable && (items.silicon || 0) < 200 && ((sit.income || {}).silicon || 0) < 0.2 && wave >= 3) {
+        priority = "EXPAND_SILICON_ECONOMY";
+        thought = "Кремния " + (items.silicon || 0) + " и почти нет притока — расширяю кремниевую экономику (Lancer, Unloader, юниты).";
+        aggression = 0.3;
+    } else if (sit.airChainAvailable && fc.airShareNext >= 0.4 && (sit.armyUnits || 0) < 6) {
+        priority = "BUILD_T3_AIR_FLANK";
+        thought = "Следующие волны на " + Math.round(fc.airShareNext * 100) + "% воздушные — строю воздушную цепочку юнитов для фланга.";
+        aggression = 0.4;
+    } else if (sit.canCallWave && !sit.attackMode && (sit.enemies || 0) === 0) {
+        priority = "CALL_WAVE_EARLY";
+        thought = "Оборона держит прогноз волны " + (wave) + " с запасом — вызываю волну раньше таймера.";
+        aggression = 0.7;
+    } else {
+        priority = "HOLD_AND_RESEARCH";
+        thought = (fc.bossWave > 0 ? "До босса (волна " + fc.bossWave + (fc.bossFlying ? ", воздух" : ", земля") + ") копим ресурсы и науку." : "Копим ресурсы и изучаем технологии, оборона в норме.");
+        aggression = 0.3;
+    }
+    var ammoTurrets = sit.turretsAvailable || [];
+    var ammo = chooseBusAmmo(ammoTurrets, sit.items || {}, sit.itemUnlocked || null, "") || "";
+    return { ok: true, thought: thought, priority: priority, flank: flank, ammo: ammo, aggression: aggression, source: "heuristic", error: "" };
+}
+
+function llmBackoffInterval(failures) {
+    if (failures <= 2) return LLM_INTERVAL_SEC;
+    return Math.min(120, LLM_INTERVAL_SEC * Math.pow(2, failures - 2));
+}
+
+/**
+ * The strategic brain. env = { enabled(), url(), model(), post(url, body, timeoutMs, cb(ok, text)), now() }.
+ * update() is synchronous & instant: it always returns a plan (LLM when fresh, heuristic otherwise)
+ * and fires a non-blocking request when due.
+ */
+function createLlmBrain(env) {
+    var brain = {
+        lastQuery: -1e9, inFlight: false, failures: 0, requestId: 0, requests: 0, okCount: 0, badCount: 0,
+        llmPlan: null, llmAt: -1e9, lastError: "", eventPending: false, events: [],
+        plan: null, thought: "", source: "heuristic", status: "эвристика"
+    };
+    brain.markEvent = function (name) { brain.eventPending = true; brain.events.push(name); if (brain.events.length > 8) brain.events.shift(); };
+    brain.onResponse = function (id, ok, text) {
+        if (id !== brain.requestId || !brain.inFlight) return; // stale/late answer
+        brain.inFlight = false;
+        var now = env.now();
+        if (!ok) { brain.failures++; brain.lastError = "Ollama недоступна"; return; }
+        var parsed = parseLlmResponse(text);
+        if (parsed.ok) {
+            brain.llmPlan = parsed; brain.llmAt = now; brain.failures = 0; brain.okCount++; brain.lastError = "";
+        } else {
+            brain.failures++; brain.badCount++; brain.lastError = parsed.error;
+        }
+    };
+    brain.update = function (sit) {
+        var now = env.now();
+        var enabled = false;
+        try { enabled = !!env.enabled(); } catch (e) { enabled = false; }
+        if (brain.inFlight && now - brain.lastQuery > (LLM_TIMEOUT_MS / 1000) * 3) {
+            brain.inFlight = false; brain.failures++; brain.lastError = "таймаут";
+        }
+        if (enabled && !brain.inFlight) {
+            var gap = brain.failures >= 3 ? llmBackoffInterval(brain.failures) : (brain.eventPending ? 2 : LLM_INTERVAL_SEC);
+            if (now - brain.lastQuery >= gap) {
+                brain.lastQuery = now;
+                brain.eventPending = false;
+                brain.inFlight = true;
+                brain.requests++;
+                var id = ++brain.requestId;
+                try {
+                    env.post(env.url(), buildLlmRequestBody(env.model(), buildLlmPrompt(sit)), LLM_TIMEOUT_MS, function (ok, text) {
+                        brain.onResponse(id, ok, text);
+                    });
+                } catch (err) {
+                    brain.inFlight = false; brain.failures++; brain.lastError = "ошибка запроса";
+                }
+            }
+        }
+        var heur = heuristicPlan(sit);
+        var plan = heur;
+        if (enabled && brain.llmPlan && now - brain.llmAt <= LLM_PLAN_TTL_SEC && planFeasible(brain.llmPlan.priority, sit)) {
+            var lp = brain.llmPlan;
+            plan = {
+                ok: true, thought: lp.thought || heur.thought, priority: lp.priority,
+                flank: lp.flank !== "any" ? lp.flank : heur.flank,
+                ammo: lp.ammo || heur.ammo, aggression: lp.aggression, source: "gemma", error: ""
+            };
+        }
+        brain.plan = plan;
+        brain.thought = plan.thought;
+        brain.source = plan.source;
+        brain.status = !enabled ? "ИИ выкл — эвристика"
+            : plan.source === "gemma" ? "Gemma 4 E2B"
+            : brain.failures > 0 ? "эвристика (Ollama недоступна)" : "эвристика";
+        return plan;
+    };
+    brain.hudLine = function () {
+        var tag = brain.source === "gemma" ? "[#8be9fd]🧠[]" : "[lightgray]⚙[]";
+        return "💭 Мысль: [white]" + (brain.thought || "оцениваю обстановку...") + "[] " + tag;
+    };
+    return brain;
+}
+
+/** Applies the strategy bias to a safety factor / priorities (used by decideSector). */
+function aggressionSafetyScale(aggression) {
+    if (typeof aggression !== "number" || isNaN(aggression)) return 1;
+    return Math.max(0.5, Math.min(1.5, 1.5 - aggression));
+}
+
+// ------------------------------------------------ recon: time-sliced terrain scan
+
+/**
+ * Time-sliced whole-map scan (never blocks the game thread): passability grid, distance
+ * transform, A* corridors spawn/enemy core -> our core, chokepoints and a resource inventory.
+ * env: { w, h, passable(x,y)->bool, feature(x,y)->string ("" | "ore:<item>" | "water" | "deep" | "oil" | "heat"),
+ *        coreX, coreY, sources:[x,y,...] }.
+ * step(tileBudget, pathBudget) returns true when finished.
+ */
+function createTerrainScan(env) {
+    var w = env.w, h = env.h, n = w * h;
+    var sc = {
+        phase: "grid", done: false, passable: fillArray(n, 0), dist: null, paths: [], chokes: [],
+        counts: {}, nearest: {}, cursor: 0, pathIndex: 0, search: null, seedCursor: 0, queue: null, head: 0, tail: 0,
+        pathsFound: 0, sourcesTotal: (env.sources || []).length / 2
+    };
+    sc.step = function (tileBudget, pathBudget) {
+        if (sc.done) return true;
+        var i, x, y;
+        if (sc.phase === "grid") {
+            var end = Math.min(n, sc.cursor + tileBudget);
+            for (i = sc.cursor; i < end; i++) {
+                x = i % w; y = (i - x) / w;
+                sc.passable[i] = env.passable(x, y) ? 1 : 0;
+                var f = env.feature ? env.feature(x, y) : "";
+                if (f) {
+                    sc.counts[f] = (sc.counts[f] || 0) + 1;
+                    var dd = distPointToPoint(x, y, env.coreX, env.coreY);
+                    if (sc.nearest[f] === undefined || dd < sc.nearest[f]) sc.nearest[f] = dd;
+                }
+            }
+            sc.cursor = end;
+            if (sc.cursor >= n) { sc.phase = "dist"; sc.dist = fillArray(n, -1); sc.queue = new Array(n); sc.seedCursor = 0; sc.head = 0; sc.tail = 0; }
+            return false;
+        }
+        if (sc.phase === "dist") {
+            if (sc.seedCursor < n) {
+                var sEnd = Math.min(n, sc.seedCursor + tileBudget * 4);
+                for (i = sc.seedCursor; i < sEnd; i++) {
+                    if (!sc.passable[i]) { sc.dist[i] = 0; sc.queue[sc.tail++] = i; }
+                }
+                sc.seedCursor = sEnd;
+                if (sc.seedCursor >= n) {
+                    for (i = 0; i < n; i++) {
+                        if (!sc.passable[i]) continue;
+                        x = i % w; y = (i - x) / w;
+                        if (x === 0 || y === 0 || x === w - 1 || y === h - 1) { sc.dist[i] = 1; sc.queue[sc.tail++] = i; }
+                    }
+                }
+                return false;
+            }
+            var budget = tileBudget * 4;
+            while (sc.head < sc.tail && budget-- > 0) {
+                i = sc.queue[sc.head++];
+                x = i % w; y = (i - x) / w;
+                for (var dy = -1; dy <= 1; dy++) {
+                    for (var dx = -1; dx <= 1; dx++) {
+                        if (!dx && !dy) continue;
+                        var nx = x + dx, ny = y + dy;
+                        if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
+                        var ni = ny * w + nx;
+                        if (sc.dist[ni] !== -1) continue;
+                        sc.dist[ni] = sc.dist[i] + 1;
+                        sc.queue[sc.tail++] = ni;
+                    }
+                }
+            }
+            if (sc.head >= sc.tail) { sc.phase = "paths"; sc.queue = null; }
+            return false;
+        }
+        if (sc.phase === "paths") {
+            var srcs = env.sources || [];
+            if (sc.pathIndex * 2 >= srcs.length) { sc.phase = "chokes"; return false; }
+            if (!sc.search) {
+                var sx = srcs[sc.pathIndex * 2], sy = srcs[sc.pathIndex * 2 + 1];
+                var near = nearestPassable(w, h, sc.passable, sx, sy, 4);
+                var tc = nearestPassable(w, h, sc.passable, env.coreX, env.coreY, 4);
+                if (!near || !tc) { sc.pathIndex++; return false; }
+                sc.search = createPathSearch(w, h, sc.passable, sc.dist, near[0], near[1], tc[0], tc[1]);
+            }
+            if (sc.search.step(pathBudget)) {
+                if (sc.search.found) { sc.paths.push({ xs: sc.search.xs, ys: sc.search.ys }); sc.pathsFound++; }
+                sc.search = null;
+                sc.pathIndex++;
+            }
+            return false;
+        }
+        if (sc.phase === "chokes") {
+            sc.chokes = findChokepoints(w, h, sc.passable, sc.dist, sc.paths, env.coreX, env.coreY, env.chokeOpts || {});
+            sc.done = true;
+            sc.phase = "done";
+            return true;
+        }
+        return sc.done;
+    };
+    return sc;
+}
+
+function nearestPassable(w, h, passable, x, y, maxR) {
+    for (var r = 0; r <= maxR; r++) {
+        for (var dy = -r; dy <= r; dy++) {
+            for (var dx = -r; dx <= r; dx++) {
+                if (Math.max(Math.abs(dx), Math.abs(dy)) !== r) continue;
+                var nx = x + dx, ny = y + dy;
+                if (inBounds(w, h, nx, ny) && passable[ny * w + nx]) return [nx, ny];
+            }
+        }
+    }
+    return null;
+}
+
+/** One-line Russian recon summary for the HUD / journal. */
+function summarizeRecon(scan, sched, coreX, coreY) {
+    var parts = [];
+    var ores = [];
+    var keys = Object.keys(scan.counts);
+    for (var i = 0; i < keys.length; i++) {
+        if (keys[i].indexOf("ore:") === 0) ores.push(keys[i].substring(4) + " " + scan.counts[keys[i]]);
+    }
+    parts.push("руды: " + (ores.length ? ores.join(", ") : "нет"));
+    parts.push("вода: " + (scan.counts["water"] || scan.counts["deep"] ? "есть" : "нет")
+        + ", нефть: " + (scan.counts["oil"] ? "есть" : "нет") + ", термо: " + (scan.counts["heat"] || 0));
+    if (scan.chokes.length) {
+        var c = scan.chokes[0];
+        parts.push("проходы: " + scan.chokes.length + " (ширина " + c.width + " в " + Math.round(c.dist) + " тайлах, "
+            + compassFlank((c.cx - coreX), (c.cy - coreY)) + ")");
+    } else {
+        parts.push("проходы: нет");
+    }
+    if (sched) {
+        parts.push("авиация с волны " + (sched.firstAirWave > 0 ? sched.firstAirWave : "—")
+            + ", босс " + (sched.bossWave > 0 ? "волна " + sched.bossWave + " (" + sched.bossType + (sched.bossFlying ? ", воздух" : ", земля") + ")" : "—"));
+    }
+    return parts.join(" · ");
 }
 
 // --------------------------------------------------- Mindustry runtime glue
@@ -2570,6 +4273,85 @@ if (typeof module !== "undefined" && module.exports) {
         buildFortressTemplate: buildFortressTemplate,
         createWatchdog: createWatchdog,
         formatHudText: formatHudText,
+        CELL_LANE: CELL_LANE,
+        ROLE_WALL: ROLE_WALL,
+        ROLE_GROUND_TURRET: ROLE_GROUND_TURRET,
+        ROLE_AIR_TURRET: ROLE_AIR_TURRET,
+        ROLE_SUPPORT: ROLE_SUPPORT,
+        ROLE_POWER_NODE: ROLE_POWER_NODE,
+        DX: DX,
+        DY: DY,
+        ROLE_WALL_WINDOW: ROLE_WALL_WINDOW,
+        ROLE_WALL_INNER: ROLE_WALL_INNER,
+        ROLE_FRONT_TURRET: ROLE_FRONT_TURRET,
+        ROLE_FORCE: ROLE_FORCE,
+        ROLE_OVERDRIVE: ROLE_OVERDRIVE,
+        ROLE_LIQUID_TURRET: ROLE_LIQUID_TURRET,
+        ROLE_POINT_DEFENSE: ROLE_POINT_DEFENSE,
+        ZONE_NONE: ZONE_NONE,
+        ZONE_NUCLEUS: ZONE_NUCLEUS,
+        ZONE_LANE: ZONE_LANE,
+        KIND_CONVEYOR: KIND_CONVEYOR,
+        KIND_LOGISTICS: KIND_LOGISTICS,
+        KIND_OTHER: KIND_OTHER,
+        BUS_CONVEYOR: BUS_CONVEYOR,
+        BUS_ROUTER: BUS_ROUTER,
+        BUS_JUNCTION: BUS_JUNCTION,
+        BUS_UNLOADER: BUS_UNLOADER,
+        distanceToWall: distanceToWall,
+        createPathSearch: createPathSearch,
+        findGroundPath: findGroundPath,
+        findChokepoints: findChokepoints,
+        chokePos: chokePos,
+        compassFlank: compassFlank,
+        flankVector: flankVector,
+        buildKillBox: buildKillBox,
+        groundPathCostThroughWall: groundPathCostThroughWall,
+        killBoxCrossingP: killBoxCrossingP,
+        planAaCorridor: planAaCorridor,
+        TURRET_AMMO: TURRET_AMMO,
+        turretAcceptsAmmo: turretAcceptsAmmo,
+        chooseAmmoItem: chooseAmmoItem,
+        chooseBusAmmo: chooseBusAmmo,
+        pickTurretForAmmo: pickTurretForAmmo,
+        statusSynergy: statusSynergy,
+        planAmmoBus: planAmmoBus,
+        planAmmoDrillFeed: planAmmoDrillFeed,
+        rectTouchesCell: rectTouchesCell,
+        reactorGuard: reactorGuard,
+        reactorShouldCutFuel: reactorShouldCutFuel,
+        findReactorSite: findReactorSite,
+        waveGroupCount: waveGroupCount,
+        analyzeWaveSchedule: analyzeWaveSchedule,
+        computeCoreZones: computeCoreZones,
+        zoneAllows: zoneAllows,
+        createDamageHeat: createDamageHeat,
+        pickBreachReinforcement: pickBreachReinforcement,
+        buildDangerGrid: buildDangerGrid,
+        straightPathDanger: straightPathDanger,
+        planFlankRoute: planFlankRoute,
+        pickAssaultTarget: pickAssaultTarget,
+        splitSquadByHealth: splitSquadByHealth,
+        UNIT_LINES: UNIT_LINES,
+        chooseUnitLine: chooseUnitLine,
+        findUnitChainSlotTiers: findUnitChainSlotTiers,
+        extractJsonObject: extractJsonObject,
+        sanitizeThought: sanitizeThought,
+        normalizeFlank: normalizeFlank,
+        normalizeAmmo: normalizeAmmo,
+        parseLlmResponse: parseLlmResponse,
+        buildLlmPrompt: buildLlmPrompt,
+        buildLlmRequestBody: buildLlmRequestBody,
+        planFeasible: planFeasible,
+        heuristicPlan: heuristicPlan,
+        llmBackoffInterval: llmBackoffInterval,
+        createLlmBrain: createLlmBrain,
+        aggressionSafetyScale: aggressionSafetyScale,
+        createTerrainScan: createTerrainScan,
+        summarizeRecon: summarizeRecon,
+        LLM_PLANS: LLM_PLANS,
+        LLM_DEFAULT_URL: LLM_DEFAULT_URL,
+        LLM_DEFAULT_MODEL: LLM_DEFAULT_MODEL,
         installMindustryCampaignBot: installMindustryCampaignBot
     };
 }

@@ -13,7 +13,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   buildCampaignBot:
@@ -71,3 +71,33 @@ jobs:
           name: SerpuloCampaignBot-zip
           path: mindustry-campaign-bot/release/SerpuloCampaignBot.zip
           if-no-files-found: error
+
+      - name: Publish GitHub Release on main
+        if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="serpulo-campaign-bot-1.0"
+          JAR="mindustry-campaign-bot/build/libs/SerpuloCampaignBot.jar"
+          ZIP="mindustry-campaign-bot/release/SerpuloCampaignBot.zip"
+          JAR_SHA=$(sha256sum "$JAR" | cut -d' ' -f1)
+          ZIP_SHA=$(sha256sum "$ZIP" | cut -d' ' -f1)
+          NOTES=$(printf '%s\n' \
+            'Самостоятельный мод автопрохождения кампании Serpulo для **Mindustry v8** (build 154+ / `v160.7`).' \
+            '' \
+            'Два готовых файла — ставьте **только один** из них (`Mods → Import file…`):' \
+            '- `SerpuloCampaignBot.jar` — скомпилированный Java 17 мод (рекомендуется);' \
+            '- `SerpuloCampaignBot.zip` — скриптовая версия (Java не требуется).' \
+            '' \
+            "**SHA-256:**" \
+            "- \`SerpuloCampaignBot.jar\`: \`$JAR_SHA\`" \
+            "- \`SerpuloCampaignBot.zip\`: \`$ZIP_SHA\`")
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            gh release upload "$TAG" "$JAR" "$ZIP" --clobber
+          else
+            gh release create "$TAG" "$JAR" "$ZIP" \
+              --target "$GITHUB_SHA" \
+              --title "Serpulo Campaign Bot 1.0 — автопрохождение кампании Mindustry v8" \
+              --notes "$NOTES" \
+              --prerelease
+          fi

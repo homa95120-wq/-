@@ -634,7 +634,7 @@ for (const drillSize of [2, 3, 4]) {
     // ---- core zoning: Nucleus reserve + conveyor lanes
     {
         const W = 50, H = 50, z = bot.computeCoreZones(W, H, 25, 25, 3, 12);
-        ok(z[25 * W + 25 + 2] === bot.ZONE_NUCLEUS && z[(25 + 3) * W + 25] === bot.ZONE_LANE, "nucleus reserve and lanes");
+        ok(z[25 * W + 25 + 2] === bot.ZONE_NUCLEUS && z[(25 + 5) * W + 25] === bot.ZONE_LANE && z[(25 + 3) * W + 25] === bot.ZONE_NONE, "nucleus reserve and lanes");
         ok(!bot.zoneAllows(bot.ZONE_NUCLEUS, bot.KIND_OTHER) && bot.zoneAllows(bot.ZONE_LANE, bot.KIND_CONVEYOR) && !bot.zoneAllows(bot.ZONE_LANE, bot.KIND_OTHER), "zone rules");
         ok(bot.zoneAllows(bot.ZONE_NONE, bot.KIND_OTHER), "free zone allows anything");
     }

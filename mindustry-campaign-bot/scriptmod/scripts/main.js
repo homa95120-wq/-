@@ -644,7 +644,7 @@ function countFreeCorePerimeter(w, h, cells) {
     var count = 0;
     for (var y = 0; y < h; y++) {
         for (var x = 0; x < w; x++) {
-            if (cells[y * w + x] !== CELL_FREE) continue;
+            if (cells[y * w + x] !== CELL_FREE && cells[y * w + x] !== CELL_LANE) continue;
             for (var d = 0; d < 4; d++) {
                 var nx = x + DX[d], ny = y + DY[d];
                 if (nx >= 0 && ny >= 0 && nx < w && ny < h && cells[ny * w + nx] === CELL_CORE) {
@@ -664,7 +664,7 @@ function findUnloaderCell(w, h, cells, x0, y0, size) {
             if (edgeX === edgeY) continue;
             var ux = x0 + dx, uy = y0 + dy;
             if (ux < 0 || uy < 0 || ux >= w || uy >= h) continue;
-            if (cells[uy * w + ux] !== CELL_FREE) continue;
+            if (cells[uy * w + ux] !== CELL_FREE && cells[uy * w + ux] !== CELL_LANE) continue;
             for (var d = 0; d < 4; d++) {
                 var nx = ux + DX[d], ny = uy + DY[d];
                 if (nx >= 0 && ny >= 0 && nx < w && ny < h && cells[ny * w + nx] === CELL_CORE) {
@@ -869,7 +869,7 @@ function createWatchdog() {
     };
 }
 
-function formatHudText(state, capturedPresets, totalPresets, sectorTitle, phaseText, researchText, armyText, detailText) {
+function formatHudText(state, capturedPresets, totalPresets, sectorTitle, phaseText, researchText, armyText, detailText, thoughtLine) {
     var lines = [];
     lines.push("[" + stateColor(state) + "]🤖 Автокампания Serpulo: " + stateName(state)
         + "[] [lightgray](" + capturedPresets + "/" + totalPresets + " сюж.)[]");
@@ -878,6 +878,7 @@ function formatHudText(state, capturedPresets, totalPresets, sectorTitle, phaseT
     if (researchText) lines.push("🔬 Наука: [lightgray]" + researchText + "[]");
     if (armyText) lines.push("⚔ Армия: [lightgray]" + armyText + "[]");
     if (detailText) lines.push("💬 [lightgray]" + detailText + "[]");
+    if (thoughtLine) lines.push(thoughtLine);
     return lines.join("\n");
 }
 
@@ -1770,7 +1771,8 @@ function computeCoreZones(w, h, cx, cy, coreSize, laneLen) {
     var cOff = sizeOffset(coreSize);
     var cx0 = cx + cOff, cy0 = cy + cOff;
     var x, y;
-    for (var d = 1; d <= laneLen + 3; d++) {
+    // lanes start 3 tiles beyond the Nucleus ring so hub crafters (2x2/3x3 touching the core) keep their spots
+    for (var d = 3; d <= laneLen + 3; d++) {
         for (var lane = -1; lane <= 1; lane++) {
             var pts = [[cx + lane, cy + 2 + d], [cx + lane, cy - 2 - d], [cx + 2 + d, cy + lane], [cx - 2 - d, cy + lane]];
             for (var q = 0; q < 4; q++) {
@@ -2576,6 +2578,108 @@ function summarizeRecon(scan, sched, coreX, coreY) {
     return parts.join(" · ");
 }
 
+// ------------------------------------------------ fortress kit / walls / core zoning helpers
+
+var WALL_TIERS = ["copper-wall", "titanium-wall", "thorium-wall", "surge-wall"];
+
+/**
+ * Wall block candidates for a kill-box slot, best first (callers fall back to the next one when
+ * the stock is short). usableMap: {blockName: bool}. layer 0 is the layer nearest to the turrets,
+ * the last layer is the outermost: the strongest tier goes outside, the bait window stays cheap,
+ * the inner layer is plastanium (absorbs piercing lasers of Quasar/Vela/Corvus).
+ */
+function pickFortressWalls(role, size, layer, flankLayers, usableMap) {
+    var tiers = [], i;
+    for (i = 0; i < WALL_TIERS.length; i++) {
+        var nm = size === 2 ? WALL_TIERS[i] + "-large" : WALL_TIERS[i];
+        if (usableMap[nm]) tiers.push(nm);
+    }
+    var out = [];
+    if (role === ROLE_WALL_INNER) {
+        var pl = size === 2 ? "plastanium-wall-large" : "plastanium-wall";
+        if (usableMap[pl]) out.push(pl);
+        for (i = tiers.length - 1; i >= 0; i--) out.push(tiers[i]);
+        return out;
+    }
+    if (!tiers.length) return out;
+    if (role === ROLE_WALL_WINDOW) return [tiers[0]];
+    var best = tiers.length - 1;
+    var idx = Math.max(0, Math.min(best, best - (flankLayers - 1 - layer)));
+    for (i = idx; i >= 0; i--) out.push(tiers[i]);
+    return out;
+}
+
+var KIT_MAIN = [["spectre", 4], ["ripple", 3], ["cyclone", 3], ["salvo", 2], ["hail", 1], ["duo", 1]];
+var KIT_FRONT = [["lancer", 2], ["arc", 1], ["scorch", 1]];
+
+/**
+ * Chooses the kill-box turret kit from what is unlocked, affordable and fed by the ammo bus.
+ * usableMap: {name: bool}; afford(name, count) -> bool; stock: {item: amount}; netPower: units/s.
+ */
+function chooseFortressKit(usableMap, afford, stock, netPower, preferredAmmo) {
+    var kit = { main: "duo", mainSize: 1, front: "", frontSize: 1, support: "", supportSize: 1, wantForce: false, wantOverdrive: false, ammo: "" };
+    var i, e, name;
+    for (i = 0; i < KIT_MAIN.length; i++) {
+        e = KIT_MAIN[i]; name = e[0];
+        if (!usableMap[name] || !afford(name, 3)) continue;
+        if (!chooseAmmoItem(name, stock, null, preferredAmmo || "")) continue;
+        kit.main = name; kit.mainSize = e[1];
+        break;
+    }
+    if (kit.main === "duo" && !usableMap["duo"]) { kit.main = ""; kit.mainSize = 1; }
+    if (kit.main) kit.ammo = chooseAmmoItem(kit.main, stock, null, preferredAmmo || "") || "copper";
+    for (i = 0; i < KIT_FRONT.length; i++) {
+        e = KIT_FRONT[i]; name = e[0];
+        if (!usableMap[name] || !afford(name, 2)) continue;
+        if (name === "scorch" ? (stock["coal"] || 0) < 60 : netPower < 30) continue;
+        kit.front = name; kit.frontSize = e[1];
+        break;
+    }
+    if (usableMap["mend-projector"] && afford("mend-projector", 1)) { kit.support = "mend-projector"; kit.supportSize = 2; }
+    else if (usableMap["mender"]) { kit.support = "mender"; kit.supportSize = 1; }
+    kit.wantForce = !!(usableMap["force-projector"] && netPower >= 60 && afford("force-projector", 1));
+    kit.wantOverdrive = !!(usableMap["overdrive-projector"] && netPower >= 150 && afford("overdrive-projector", 1));
+    return kit;
+}
+
+/** Window cell adjacent to the core (FREE or LANE) closest to (tx, ty): where the bus Unloader goes. */
+function findBusUnloaderCell(w, h, cells, tx, ty) {
+    var best = -1, bestD = 1e18;
+    for (var y = 0; y < h; y++) {
+        for (var x = 0; x < w; x++) {
+            var c = cells[y * w + x];
+            if (c !== CELL_FREE && c !== CELL_LANE) continue;
+            var touches = false;
+            for (var d = 0; d < 4; d++) {
+                var nx = x + DX[d], ny = y + DY[d];
+                if (nx >= 0 && ny >= 0 && nx < w && ny < h && cells[ny * w + nx] === CELL_CORE) { touches = true; break; }
+            }
+            if (!touches) continue;
+            var dd = (x - tx) * (x - tx) + (y - ty) * (y - ty);
+            if (dd < bestD) { bestD = dd; best = y * w + x; }
+        }
+    }
+    return best;
+}
+
+/** Marks conveyor corridors (and, when asked, the Nucleus 5x5 reserve) on the window grid as CELL_LANE. */
+function applyCoreZones(w, h, cells, cx, cy, coreSize, laneLen, reserveNucleus, ore) {
+    var zone = computeCoreZones(w, h, cx, cy, coreSize, laneLen);
+    var n = 0;
+    for (var i = 0; i < w * h; i++) {
+        if (zone[i] === ZONE_NONE || cells[i] !== CELL_FREE) continue;
+        if (zone[i] === ZONE_NUCLEUS && !reserveNucleus) continue;
+        if (ore && ore[i] >= 0) continue; // never reserve ore tiles: drills come first
+        cells[i] = CELL_LANE;
+        n++;
+    }
+    return n;
+}
+
+function kebabToCamel(name) {
+    return String(name).replace(/-([a-z0-9])/g, function (m, c) { return c.toUpperCase(); });
+}
+
 // --------------------------------------------------- Mindustry runtime glue
 
 function installMindustryCampaignBot() {
@@ -2621,6 +2725,7 @@ function installMindustryCampaignBot() {
     var hudLabel = null;
     var planetLabel = null;
     var bodyTable = null;
+    var llmButton = null;
     var nextUiRefresh = 0;
 
     try {
@@ -3340,6 +3445,42 @@ function installMindustryCampaignBot() {
         });
     }
 
+    /** v2.0 RTS assault: danger-map flank route, power/ammo-first target priority, wounded units retreat to repair. */
+    function proAssault(ids, combat, core, team, cap) {
+        var enemyData = Vars.state.teams.get(Vars.state.rules.waveTeam);
+        if (!enemyData) return false;
+        var nowSec = Time.time / 60;
+        var res = proSafe("RTS", function () {
+            var pro = bot.pro;
+            var units = [];
+            for (var i = 0; i < combat.length && i < 180; i++) {
+                var hp = combat[i].maxHealth > 0 ? combat[i].health / combat[i].maxHealth : 1;
+                units.push({ id: combat[i].id, hpFrac: isNaN(hp) ? 1 : hp });
+            }
+            var split = splitSquadByHealth(units, pro.retreating);
+            pro.retreating = {};
+            for (var r = 0; r < split.retreat.length; r++) pro.retreating[split.retreat[r]] = true;
+            var cmd = proAssaultCommand(split.fight, combat, core, team, enemyData, nowSec);
+            if (!cmd) return null;
+            return { split: split, cmd: cmd };
+        }, null);
+        if (!res) return false;
+        if (res.split.retreat.length) {
+            Call.commandUnits(Vars.player, res.split.retreat, null, null, proRepairSpot(team, core), false, true);
+        }
+        var cmd = res.cmd, fightIds = res.split.fight;
+        if (fightIds.length) {
+            if (cmd.last && cmd.target.build) {
+                Call.commandUnits(Vars.player, fightIds, cmd.target.build, null, new Vec2(cmd.target.build.x, cmd.target.build.y), false, true);
+            } else {
+                Call.commandUnits(Vars.player, fightIds, null, null, new Vec2(cmd.wx * Vars.tilesize, cmd.wy * Vars.tilesize), false, true);
+            }
+        }
+        bot.armySummary = combat.length + "/" + cap + " · штурм: " + cmd.target.kind + (cmd.flank ? " (обход)" : "")
+            + (res.split.retreat.length ? " · ремонт: " + res.split.retreat.length : "");
+        return true;
+    }
+
     function updateArmySquads(data, core, team, sector) {
         var combat = [];
         var pUnit = Vars.player ? Vars.player.unit() : null;
@@ -3367,6 +3508,7 @@ function installMindustryCampaignBot() {
         var cap = Units.getCap(team);
         bot.squadMode = decideSquadMode(!!Vars.state.rules.attackMode, bot.squadMode, combat.length, cap, nearEnemy ? 1 : 0, diff);
 
+        bot.pro.armyCount = combat.length;
         if (!combat.length) {
             bot.armySummary = "0/" + cap + " боевых";
             return;
@@ -3382,6 +3524,8 @@ function installMindustryCampaignBot() {
         if (bot.squadMode === SQUAD_DEFEND && nearEnemy) {
             Call.commandUnits(Vars.player, ids, null, nearEnemy, new Vec2(nearEnemy.x, nearEnemy.y), false, true);
             bot.armySummary = combat.length + "/" + cap + " · защита базы";
+        } else if (bot.squadMode === SQUAD_ASSAULT && proAssault(ids, combat, core, team, cap)) {
+            // v2.0 RTS: flank route, power-first targets, wounded retreat (handled in proAssault)
         } else if (bot.squadMode === SQUAD_ASSAULT) {
             var enemyData = Vars.state.teams.get(Vars.state.rules.waveTeam);
             var targetBuild = null, bestCoreDst = 1e12, enemyCore = null, bestTurret = null, bestTurretDst = 1e12;
@@ -3457,6 +3601,691 @@ function installMindustryCampaignBot() {
         return String(crafter.localizedName);
     }
 
+    // ======================================================================
+    // v2.0 pro runtime: recon, chokepoint kill-box, ammo bus, AA corridor,
+    // after-action learning, RTS flanking and the Gemma strategic brain.
+    // Every part is wrapped in proSafe(): a failure disables only that part,
+    // the v1 planner keeps working.
+    // ======================================================================
+
+    function proNewState() {
+        return {
+            sectorKey: null, scan: null, scanDone: false, choke: null, chokes: [], kill: null, killKey: "", recon: "",
+            sched: null, heat: createDamageHeat(), prevHp: {}, nextHeatSec: 0, breach: null, breachHandled: -1,
+            busPlan: null, busBuilt: false, busFails: 0, aaBuilt: 0, startSec: 0, lastRetuneSec: 0,
+            fortTotal: 0, fortSat: 0, fortTurretsBuilt: 0, kit: null, lastSit: null, plan: null,
+            route: null, routeKey: "", routeIdx: 0, routeAt: -1e9, retreating: {}, errLogged: {}, ammoNow: "",
+            reactor: { phase: 0, site: null, mixerPlanned: false }, enemyKnown: false
+        };
+    }
+    bot.pro = proNewState();
+
+    function proSafe(label, fn, fallback) {
+        try { return fn(); } catch (e) {
+            if (!bot.pro.errLogged[label]) {
+                bot.pro.errLogged[label] = true;
+                botLog("про-модуль «" + label + "» отключён: " + e);
+            }
+            return fallback;
+        }
+    }
+
+    function llmSettingBool(key, def) {
+        try { return Core.settings.getBool(key, def); } catch (e) { return def; }
+    }
+    function llmSettingStr(key, def) {
+        try { var v = Core.settings.getString(key, def); return v && String(v).length ? String(v) : def; } catch (e) { return def; }
+    }
+
+    var llmEnv = {
+        enabled: function () { return llmSettingBool(PREF_LLM_ENABLED, true); },
+        url: function () { return llmSettingStr(PREF_LLM_URL, LLM_DEFAULT_URL); },
+        model: function () { return llmSettingStr(PREF_LLM_MODEL, LLM_DEFAULT_MODEL); },
+        now: function () { return Time.time / 60; },
+        // Non-blocking HTTP: arc.util.Http runs on its own thread, the answer is applied on the game thread.
+        post: function (url, body, timeoutMs, cb) {
+            var req = Http.post(url, body);
+            req.header("Content-Type", "application/json");
+            req.timeout(timeoutMs);
+            req.error(asCons(function (err) {
+                Core.app.post(asRun(function () { cb(false, String(err)); }));
+            }));
+            req.submit(asCons(function (res) {
+                var text = "";
+                try { text = String(res.getResultAsString()); } catch (e) { text = ""; }
+                Core.app.post(asRun(function () { cb(true, text); }));
+            }));
+        }
+    };
+    bot.pro.brain = createLlmBrain(llmEnv);
+
+    function toggleLlm() {
+        var on = !llmSettingBool(PREF_LLM_ENABLED, true);
+        try { Core.settings.put(PREF_LLM_ENABLED, on); } catch (ignored) {}
+        botLog(on ? "ИИ Gemma включён" : "ИИ Gemma выключен — работает встроенный планировщик");
+        refreshUi();
+    }
+
+    function proBlock(name) {
+        var b = null;
+        try { b = Blocks[kebabToCamel(name)]; } catch (e) { b = null; }
+        return b || null;
+    }
+    function proItem(name) {
+        var it = null;
+        try { it = Items[kebabToCamel(name)]; } catch (e) { it = null; }
+        return it || null;
+    }
+
+    function proStockMap(core) {
+        var m = {};
+        seqEach(Vars.content.items(), function (it) { m[String(it.name)] = core.items.get(it); });
+        return m;
+    }
+
+    function proUsableMap() {
+        var names = ["copper-wall", "copper-wall-large", "titanium-wall", "titanium-wall-large", "thorium-wall", "thorium-wall-large",
+            "surge-wall", "surge-wall-large", "plastanium-wall", "plastanium-wall-large",
+            "duo", "scatter", "scorch", "hail", "wave", "lancer", "arc", "swarmer", "salvo", "segment", "tsunami", "fuse", "ripple",
+            "cyclone", "foreshadow", "spectre", "meltdown", "mender", "mend-projector", "overdrive-projector", "force-projector",
+            "router", "junction", "unloader", "conveyor", "titanium-conveyor", "thorium-reactor", "cryofluid-mixer", "water-extractor",
+            "repair-point", "payload-conveyor", "power-node", "ground-factory", "air-factory", "naval-factory",
+            "additive-reconstructor", "multiplicative-reconstructor", "exponential-reconstructor", "tetrative-reconstructor"];
+        var m = {};
+        for (var i = 0; i < names.length; i++) m[names[i]] = usable(proBlock(names[i]));
+        return m;
+    }
+
+    function proTileOf(entity) {
+        return [Math.round(entity.x / Vars.tilesize), Math.round(entity.y / Vars.tilesize)];
+    }
+
+    function proWaveGroups() {
+        var groups = [];
+        seqEach(Vars.state.rules.spawns, function (grp) {
+            if (!grp || !grp.type) return;
+            var dps = 10;
+            try { if (grp.type.estimateDps) dps = grp.type.estimateDps(); } catch (e) { dps = 10; }
+            var boss = false;
+            try { boss = typeof StatusEffects !== "undefined" && grp.effect === StatusEffects.boss; } catch (e) { boss = false; }
+            groups.push({
+                type: String(grp.type.name), flying: !!grp.type.flying, begin: grp.begin || 0,
+                end: grp.end === undefined ? -1 : grp.end, spacing: grp.spacing || 1,
+                amount: typeof grp.unitAmount === "number" ? grp.unitAmount : 1,
+                scaling: typeof grp.unitScaling === "number" ? grp.unitScaling : 1e9,
+                max: typeof grp.max === "number" ? grp.max : 1e9, boss: boss,
+                hp: grp.type.health || 100, dps: dps, shield: grp.shields || 0, shieldScaling: grp.shieldScaling || 0
+            });
+        });
+        return groups;
+    }
+
+    function proScanEnv(core) {
+        var sources = [];
+        seqEach(Vars.spawner.getSpawns(), function (sp) {
+            if (typeof sp.x === "number" && typeof sp.y === "number") sources.push(sp.x, sp.y);
+            else sources.push(Math.round(sp.worldx() / Vars.tilesize), Math.round(sp.worldy() / Vars.tilesize));
+        });
+        var enemyData = Vars.state.teams.get(Vars.state.rules.waveTeam);
+        if (enemyData) seqEach(enemyData.cores, function (ec) { var t = proTileOf(ec); sources.push(t[0], t[1]); });
+        return {
+            w: Vars.world.width(), h: Vars.world.height(), coreX: core.tileX(), coreY: core.tileY(), sources: sources,
+            passable: function (x, y) {
+                var t = Vars.world.tile(x, y);
+                if (!t) return false;
+                var fl = t.floor();
+                if (fl && typeof fl.isDeep === "function" && fl.isDeep()) return false;
+                if (typeof t.solid === "function" && t.solid() && !t.build) return false;
+                return true;
+            },
+            feature: function (x, y) {
+                var t = Vars.world.tile(x, y);
+                if (!t) return "";
+                var fl = t.floor();
+                if (fl && typeof fl.isDeep === "function" && fl.isDeep()) return "deep";
+                if (fl && fl.isLiquid) {
+                    var ld = fl.liquidDrop;
+                    if (ld) return String(ld.name) === "oil" ? "oil" : "water";
+                }
+                if (t.block() === Blocks.air) {
+                    var d = t.drop();
+                    if (d) return "ore:" + String(d.name);
+                }
+                if (fl && fl.attributes && typeof Attribute !== "undefined" && fl.attributes.get(Attribute.heat) > 0.25) return "heat";
+                return "";
+            }
+        };
+    }
+
+    function proEnterSector(sector, core, nowSec) {
+        var key = (sector ? String(sector.id) : "?") + ":" + core.tileX() + ":" + core.tileY();
+        if (bot.pro.sectorKey === key) return;
+        var brain = bot.pro.brain;
+        bot.pro = proNewState();
+        bot.pro.brain = brain;
+        bot.pro.sectorKey = key;
+        bot.pro.startSec = nowSec;
+        proSafe("разведка", function () {
+            bot.pro.scan = createTerrainScan(proScanEnv(core));
+            bot.pro.sched = analyzeWaveSchedule(proWaveGroups(), Math.max(0, (Vars.state.wave || 1) - 1), 5, 150);
+            brain.markEvent("sector");
+            var s = bot.pro.sched;
+            botLog("разведка карты: " + (s.firstAirWave > 0 ? "авиация с волны " + s.firstAirWave : "авиации нет")
+                + (s.bossWave > 0 ? ", босс " + s.bossType + " на волне " + s.bossWave : ""));
+        }, null);
+    }
+
+    function proStepScan(core) {
+        var pro = bot.pro;
+        if (!pro.scan || pro.scanDone) return;
+        proSafe("разведка", function () {
+            if (pro.scan.step(4000, 2500)) {
+                pro.scanDone = true;
+                pro.chokes = pro.scan.chokes;
+                pro.choke = pro.chokes.length ? pro.chokes[0] : null;
+                pro.recon = summarizeRecon(pro.scan, pro.sched, core.tileX(), core.tileY());
+                botLog("разведка: " + pro.recon);
+                bot.pro.brain.markEvent("recon");
+            }
+        }, null);
+        if (bot.pro.errLogged["разведка"]) { pro.scan = null; pro.scanDone = true; }
+    }
+
+    /** After-action learning: tracks HP loss of our buildings between decisions (4x4 heat buckets). */
+    function proUpdateHeat(data, team, core, nowSec) {
+        var pro = bot.pro;
+        if (nowSec < pro.nextHeatSec) return;
+        pro.nextHeatSec = nowSec + 1.5;
+        var fresh = {};
+        seqEach(data.buildings, function (b) {
+            if (!b || !b.block || b === core) return;
+            var key = b.pos();
+            var hp = b.health;
+            fresh[key] = hp;
+            var prev = pro.prevHp[key];
+            if (prev !== undefined && hp < prev - 1) {
+                var air = false;
+                var en = Units.closestEnemy(team, b.x, b.y, 14 * Vars.tilesize, boolf(function (e) { return !e.dead() && e.isFlying(); }));
+                if (en) air = true;
+                pro.heat.record(Math.round(b.x / Vars.tilesize), Math.round(b.y / Vars.tilesize), prev - hp, air);
+            }
+        });
+        pro.prevHp = fresh;
+    }
+
+    function proAfterWave(core) {
+        var pro = bot.pro;
+        if (pro.heat.total <= 0) return;
+        var rep = pickBreachReinforcement(pro.heat, core.tileX(), core.tileY(), 600);
+        if (rep) {
+            rep.wave = Vars.state.wave || 0;
+            pro.breach = rep;
+            botLog("разбор волны: пробито направление " + rep.flank + " (" + Math.round(rep.amount) + " урона" + (rep.air ? ", воздух" : "") + ")");
+            pro.brain.markEvent("breach");
+        }
+        pro.heat.reset();
+    }
+
+    function proWallsGate(pro) {
+        return pro.fortTurretsBuilt >= 2 || (Vars.state.wave || 0) >= 4;
+    }
+
+    function proSlotSatisfied(x, y, role, team) {
+        var t = Vars.world.tile(x, y);
+        if (!t || !t.build || t.build.team !== team) return false;
+        var bb = t.build.block;
+        var nm = String(bb.name);
+        if (role === ROLE_WALL || role === ROLE_WALL_WINDOW || role === ROLE_WALL_INNER) {
+            return typeof BlockGroup !== "undefined" && bb.group === BlockGroup.walls;
+        }
+        if (role === ROLE_GROUND_TURRET || role === ROLE_FRONT_TURRET || role === ROLE_AIR_TURRET || role === ROLE_LIQUID_TURRET || role === ROLE_POINT_DEFENSE) {
+            if (!(bb.ammoTypes || bb.targetGround !== undefined)) return false;
+            if (role === ROLE_GROUND_TURRET && bot.pro.kit && bot.pro.kit.main) {
+                return proListRank(KIT_MAIN, nm) <= proListRank(KIT_MAIN, bot.pro.kit.main) || proListRank(KIT_MAIN, nm) === 99;
+            }
+            return true;
+        }
+        if (role === ROLE_SUPPORT) return nm === "mender" || nm === "mend-projector";
+        if (role === ROLE_POWER_NODE) return typeof bb.maxNodes === "number";
+        if (role === ROLE_FORCE) return nm.indexOf("force-projector") >= 0;
+        if (role === ROLE_OVERDRIVE) return nm.indexOf("overdrive") >= 0;
+        return false;
+    }
+
+    function proListRank(list, name) {
+        for (var i = 0; i < list.length; i++) if (list[i][0] === name) return i;
+        return 99;
+    }
+
+    /** Keeps the kit (and therefore the kill-box geometry) stable: it only changes to a strictly better kit
+     *  while nothing is built yet or once the current layout is complete (turrets upgrade in place). */
+    function proMergeKit(old, fresh, complete, nothingBuilt) {
+        if (!old) return fresh;
+        var better = proListRank(KIT_MAIN, fresh.main) < proListRank(KIT_MAIN, old.main)
+            || (fresh.front && (!old.front || proListRank(KIT_FRONT, fresh.front) < proListRank(KIT_FRONT, old.front)))
+            || (fresh.support === "mend-projector" && old.support !== "mend-projector")
+            || (fresh.wantForce && !old.wantForce) || (fresh.wantOverdrive && !old.wantOverdrive);
+        if (better && (complete || nothingBuilt)) return fresh;
+        old.ammo = fresh.ammo || old.ammo;
+        return old;
+    }
+
+    function proKillBox(core, budget, stock, netPower, usableMap) {
+        var pro = bot.pro;
+        if (!pro.choke || !pro.scan) return null;
+        var fullStock = coreBudget(core);
+        var fresh = chooseFortressKit(usableMap, function (nm, cnt) {
+            var blk = proBlock(nm);
+            return !!blk && reserve(fullStock.slice(), blk, cnt);
+        }, stock, netPower, pro.brain.plan ? pro.brain.plan.ammo : "");
+        var kit = proMergeKit(pro.kit, fresh, pro.fortTotal > 0 && pro.fortSat >= pro.fortTotal * 0.8, pro.fortTurretsBuilt === 0);
+        pro.kit = kit;
+        var key = [kit.main, kit.front, kit.support, kit.wantForce ? 1 : 0, kit.wantOverdrive ? 1 : 0, pro.choke.cx, pro.choke.cy].join("|");
+        if (pro.kill && pro.killKey === key) return pro.kill;
+        pro.kill = buildKillBox(Vars.world.width(), Vars.world.height(), pro.scan.passable, pro.choke, {
+            frontSize: kit.front ? kit.frontSize : 1, mainSize: kit.mainSize, supportSize: kit.support ? kit.supportSize : 1,
+            wantForce: kit.wantForce, wantOverdrive: kit.wantOverdrive
+        });
+        pro.killKey = key;
+        pro.busPlan = null; // the spine moves with the kit: recompute the bus
+        botLog("укрепрайон: горлышко " + pro.choke.width + " тайлов, " + compassFlank(pro.choke.cx - core.tileX(), pro.choke.cy - core.tileY())
+            + ", ударные: " + (kit.main || "—") + ", передний ряд: " + (kit.front || "—"));
+        return pro.kill;
+    }
+
+    /** Does the current kit/unlock state provide a block for this slot at all? */
+    function proSlotWanted(role, size, layer, kb, kit, usableMap) {
+        if (role === ROLE_WALL || role === ROLE_WALL_WINDOW || role === ROLE_WALL_INNER) {
+            return pickFortressWalls(role, size, layer, kb.flankLayers, usableMap).length > 0;
+        }
+        if (role === ROLE_GROUND_TURRET) return !!kit.main;
+        if (role === ROLE_FRONT_TURRET) return !!kit.front;
+        if (role === ROLE_SUPPORT) return !!kit.support;
+        if (role === ROLE_POWER_NODE) return !!usableMap["power-node"];
+        if (role === ROLE_FORCE) return !!usableMap["force-projector"];
+        if (role === ROLE_OVERDRIVE) return !!usableMap["overdrive-projector"];
+        return false;
+    }
+
+    function proPlanFortress(team, budget, kb, kit, usableMap, out) {
+        var pro = bot.pro;
+        var total = 0, sat = 0, turretsBuilt = 0;
+        var wallsOpen = proWallsGate(pro);
+        for (var s = 0; s + 4 < kb.slots.length; s += 5) {
+            var sx = kb.slots[s], sy = kb.slots[s + 1], size = kb.slots[s + 2], role = kb.slots[s + 3], layer = kb.slots[s + 4];
+            var isWall = role === ROLE_WALL || role === ROLE_WALL_WINDOW || role === ROLE_WALL_INNER;
+            if (!proSlotWanted(role, size, layer, kb, kit, usableMap)) continue;
+            total++;
+            if (proSlotSatisfied(sx, sy, role, team)) {
+                sat++;
+                if (role === ROLE_GROUND_TURRET || role === ROLE_FRONT_TURRET) turretsBuilt++;
+                continue;
+            }
+            if (isWall && !wallsOpen) continue;
+            var cands = [];
+            if (isWall) {
+                var wn = pickFortressWalls(role, size, layer, kb.flankLayers, usableMap);
+                for (var q = 0; q < wn.length; q++) cands.push(proBlock(wn[q]));
+            } else if (role === ROLE_GROUND_TURRET) cands.push(proBlock(kit.main));
+            else if (role === ROLE_FRONT_TURRET) cands.push(kit.front ? proBlock(kit.front) : null);
+            else if (role === ROLE_SUPPORT) cands.push(kit.support ? proBlock(kit.support) : null);
+            else if (role === ROLE_POWER_NODE) cands.push(usableMap["power-node"] ? Blocks.powerNode : null);
+            else if (role === ROLE_FORCE) cands.push(proBlock("force-projector"));
+            else if (role === ROLE_OVERDRIVE) cands.push(proBlock("overdrive-projector"));
+            var list = isWall ? out.walls : out.turrets;
+            var limit = isWall ? 12 : MAX_DEFENSE_PLANS_PER_CYCLE;
+            if (list.length >= limit) continue;
+            for (var c = 0; c < cands.length; c++) {
+                var blk = cands[c];
+                if (!blk || blk.size !== size || !usable(blk)) continue;
+                if (bot.rejectedSites[packCoord(sx, sy)] || !Build.validPlace(blk, team, sx, sy, 0)) continue;
+                if (!reserve(budget, blk, 1)) continue;
+                list.push(new BuildPlan(sx, sy, 0, blk));
+                break;
+            }
+        }
+        pro.fortTotal = total; pro.fortSat = sat; pro.fortTurretsBuilt = turretsBuilt;
+    }
+
+    function proPieceBlock(type, usableMap) {
+        if (type === BUS_UNLOADER) return Blocks.unloader;
+        if (type === BUS_ROUTER) return Blocks.router;
+        if (type === BUS_JUNCTION) return Blocks.junction;
+        return usableMap["titanium-conveyor"] ? Blocks.titaniumConveyor : Blocks.conveyor;
+    }
+
+    /** Ammo bus: Unloader at the core -> conveyor -> Router/Junction spine behind the turret rows. */
+    function proPlanBus(core, team, budget, cells, origin, size, kb, kit, usableMap, stock, outPlans) {
+        var pro = bot.pro;
+        if (!kb || kb.spineLen < 3 || !usableMap["router"] || !usableMap["junction"]) return;
+        if (pro.fortTurretsBuilt < 2) return;
+        if (pro.busFails >= 3) return;
+        var ammoName = (pro.brain.plan && pro.brain.plan.ammo && turretAcceptsAmmo(kit.main, pro.brain.plan.ammo)) ? pro.brain.plan.ammo : (kit.ammo || "");
+        if (!pro.busPlan) {
+            var spineWin = [];
+            for (var i = 0; i < kb.spineLen; i++) {
+                var wx = kb.spine[i * 2] - origin[0], wy = kb.spine[i * 2 + 1] - origin[1];
+                if (wx < 0 || wy < 0 || wx >= size || wy >= size) break;
+                spineWin.push(wx, wy);
+            }
+            if (spineWin.length < 6) { pro.busFails = 3; return; }
+            var unl = null;
+            if (usableMap["unloader"]) {
+                var ui = findBusUnloaderCell(size, size, cells, spineWin[0], spineWin[1]);
+                if (ui >= 0) unl = { x: ui % size, y: Math.floor(ui / size) };
+            }
+            var bus = planAmmoBus(size, size, cells, unl, spineWin);
+            if (!bus.ok) { pro.busFails++; botLog("шина боепитания: " + bus.reason); return; }
+            var pieces = [];
+            for (var p = 0; p + 3 < bus.pieces.length; p += 4) {
+                pieces.push([origin[0] + bus.pieces[p], origin[1] + bus.pieces[p + 1], bus.pieces[p + 2], bus.pieces[p + 3]]);
+            }
+            pro.busPlan = { pieces: pieces, hasUnloader: !!unl, spine0: [kb.spine[0], kb.spine[1]], len: pieces.length, ammo: ammoName };
+            botLog("шина боепитания: " + pieces.length + " блоков (" + (unl ? "Unloader" : "без Unloader") + "), патрон: " + (ammoName || "—"));
+        }
+        var bp = pro.busPlan, missing = 0, queued = 0;
+        for (var k = 0; k < bp.pieces.length; k++) {
+            var pc = bp.pieces[k];
+            var blk = proPieceBlock(pc[2], usableMap);
+            var t = Vars.world.tile(pc[0], pc[1]);
+            if (t && t.build && t.build.team === team && (t.build.block === blk || (pc[2] === BUS_CONVEYOR && String(t.build.block.name).indexOf("conveyor") >= 0))) continue;
+            missing++;
+            if (queued >= 24) continue;
+            if (!Build.validPlace(blk, team, pc[0], pc[1], pc[3])) { pro.busFails++; pro.busPlan = null; return; }
+            if (!reserve(budget, blk, 1)) continue;
+            var cfg = (pc[2] === BUS_UNLOADER && ammoName && proItem(ammoName)) ? proItem(ammoName) : null;
+            outPlans.push(new BuildPlan(pc[0], pc[1], pc[3], blk, cfg));
+            queued++;
+        }
+        pro.busBuilt = missing === 0;
+    }
+
+    function proRetuneBus(team, nowSec) {
+        var pro = bot.pro;
+        if (!pro.busPlan || !pro.busBuilt || nowSec - pro.lastRetuneSec < 6) return;
+        pro.lastRetuneSec = nowSec;
+        var ammo = pro.brain.plan ? pro.brain.plan.ammo : "";
+        if (!ammo || !pro.kit || !turretAcceptsAmmo(pro.kit.main, ammo)) ammo = pro.kit ? pro.kit.ammo : "";
+        var item = ammo ? proItem(ammo) : null;
+        if (!item) return;
+        for (var i = 0; i < pro.busPlan.pieces.length; i++) {
+            var pc = pro.busPlan.pieces[i];
+            if (pc[2] !== BUS_UNLOADER) continue;
+            var t = Vars.world.tile(pc[0], pc[1]);
+            if (t && t.build && t.build.team === team && t.build.block === Blocks.unloader && t.build.config() !== item) {
+                Call.tileConfig(Vars.player, t.build, item);
+                pro.ammoNow = ammo;
+            }
+        }
+    }
+
+    function proAaPlans(core, team, budget, usableMap, stock, data, outPlans) {
+        var pro = bot.pro;
+        var ladder = ["cyclone", "salvo", "scatter"], blk = null;
+        for (var i = 0; i < ladder.length && !blk; i++) {
+            var cand = proBlock(ladder[i]);
+            if (!cand || !usableMap[ladder[i]] || !reserve(budget.slice(), cand, 2)) continue;
+            if (!chooseAmmoItem(ladder[i], stock, null, "")) continue;
+            blk = cand;
+        }
+        if (!blk) return;
+        var gens = [];
+        seqEach(data.buildings, function (b) { if (b.block && b.block.outputsPower && b.block !== Blocks.solarPanel) { var t = proTileOf(b); gens.push(t[0], t[1]); } });
+        var sp = null;
+        seqEach(Vars.spawner.getSpawns(), function (s) { if (!sp) sp = [typeof s.x === "number" ? s.x : Math.round(s.worldx() / Vars.tilesize), typeof s.y === "number" ? s.y : Math.round(s.worldy() / Vars.tilesize)]; });
+        if (!sp) {
+            var ed = Vars.state.teams.get(Vars.state.rules.waveTeam);
+            if (ed && ed.cores.size > 0) sp = proTileOf(ed.cores.first());
+        }
+        if (!sp) return;
+        var slots = planAaCorridor(core.tileX(), core.tileY(), sp[0], sp[1], gens, { count: 4 });
+        var built = 0;
+        seqEach(data.buildings, function (b) {
+            var nm = b.block ? String(b.block.name) : "";
+            if (nm === "scatter" || nm === "cyclone" || nm === "swarmer") built++;
+        });
+        pro.aaBuilt = built;
+        for (var s2 = 0; s2 + 2 < slots.length && outPlans.length < 2; s2 += 3) {
+            var spot = findSpotNear(blk, team, slots[s2], slots[s2 + 1], 3);
+            if (!spot) continue;
+            var near = false;
+            for (var dy = -4; dy <= 4 && !near; dy++) {
+                for (var dx = -4; dx <= 4; dx++) {
+                    var tl = Vars.world.tile(spot[0] + dx, spot[1] + dy);
+                    if (tl && tl.build && tl.build.team === team && tl.build.block && (tl.build.block === Blocks.scatter || String(tl.build.block.name) === "cyclone")) { near = true; break; }
+                }
+            }
+            if (near) continue;
+            if (reserve(budget, blk, 1)) outPlans.push(new BuildPlan(spot[0], spot[1], 0, blk));
+        }
+    }
+
+    function proBreachPlans(core, team, budget, usableMap, outPlans) {
+        var pro = bot.pro;
+        var br = pro.breach;
+        if (!br || pro.breachHandled === br.wave) return;
+        var ladder = br.air ? ["cyclone", "salvo", "scatter"] : [pro.kit ? pro.kit.main : "duo", "salvo", "hail", "duo"];
+        var tx = Math.round(br.x), ty = Math.round(br.y);
+        var made = 0;
+        for (var i = 0; i < ladder.length && made < 2; i++) {
+            var blk = proBlock(ladder[i]);
+            if (!blk || !usableMap[ladder[i]]) continue;
+            var spot = findSpotNear(blk, team, tx, ty, 6);
+            if (spot && reserve(budget, blk, 1)) { outPlans.push(new BuildPlan(spot[0], spot[1], 0, blk)); made++; }
+        }
+        var sup = proBlock(usableMap["mend-projector"] ? "mend-projector" : "mender");
+        if (sup && usable(sup)) {
+            var sSpot = findSpotNear(sup, team, tx, ty, 7);
+            if (sSpot && reserve(budget, sup, 1)) outPlans.push(new BuildPlan(sSpot[0], sSpot[1], 0, sup));
+        }
+        pro.breachHandled = br.wave;
+        botLog("усиливаю пробитое направление " + br.flank + " (" + outPlans.length + " постр.)");
+    }
+
+    /** Reactor safety: cryofluid first. The reactor is only queued after the mixer holds coolant. */
+    function proReactorPlans(core, team, budget, usableMap, stock, data, netPower, cells, origin, size, outPlans) {
+        var pro = bot.pro, rs = pro.reactor;
+        if (!usableMap["thorium-reactor"] || !usableMap["cryofluid-mixer"] || !usableMap["water-extractor"]) return;
+        var existing = countBlock(data, Blocks.thoriumReactor);
+        if (existing > 0) return;
+        if ((stock["thorium"] || 0) < 120 || (stock["titanium"] || 0) < 120 || netPower < 90) return;
+        var away = [1, 0];
+        var sp = pro.scan && pro.scan.paths.length ? [pro.scan.paths[0].xs[0], pro.scan.paths[0].ys[0]] : null;
+        if (sp) away = [sp[0] - core.tileX(), sp[1] - core.tileY()];
+        if (!rs.site) {
+            var wcells = cells;
+            var site = findReactorSite(size, size, wcells, size >> 1, size >> 1, away[0], away[1], 14, 30);
+            if (!site) return;
+            rs.site = { rx: origin[0] + site.rx, ry: origin[1] + site.ry, mx: origin[0] + site.mx, my: origin[1] + site.my, ex: origin[0] + site.ex, ey: origin[1] + site.ey };
+        }
+        var S = rs.site;
+        var mixer = Blocks.cryofluidMixer, ext = Blocks.waterExtractor, rea = Blocks.thoriumReactor;
+        var mt = Vars.world.tile(S.mx, S.my), mb = mt && mt.build && mt.build.block === mixer ? mt.build : null;
+        if (!mb) {
+            if (Build.validPlace(mixer, team, S.mx, S.my, 0) && reserve(budget, mixer, 1)) outPlans.push(new BuildPlan(S.mx, S.my, 0, mixer));
+            var et = Vars.world.tile(S.ex, S.ey);
+            if (!(et && et.build) && Build.validPlace(ext, team, S.ex, S.ey, 0) && reserve(budget, ext, 1)) outPlans.push(new BuildPlan(S.ex, S.ey, 0, ext));
+            var pn = findSpotNear(Blocks.powerNode, team, S.mx + 2, S.my + 2, 3);
+            if (pn && reserve(budget, Blocks.powerNode, 1)) outPlans.push(new BuildPlan(pn[0], pn[1], 0, Blocks.powerNode));
+            return;
+        }
+        var frac = 0;
+        try { frac = mb.liquids.currentAmount() / Math.max(1, mb.block.liquidCapacity); } catch (e) { frac = 0; }
+        var why = reactorGuard({
+            reactorUnlocked: true, mixerBuilt: true, mixerCryoFrac: frac, waterOk: true,
+            titaniumStock: stock["titanium"] || 0, thoriumStock: stock["thorium"] || 0,
+            siteDistFromCore: distPointToPoint(S.rx, S.ry, core.tileX(), core.tileY()), powerNetPerSec: netPower
+        });
+        if (why) { bot.pro.reactorWhy = why; return; }
+        if (Build.validPlace(rea, team, S.rx, S.ry, 0) && reserve(budget, rea, 1)) {
+            outPlans.push(new BuildPlan(S.rx, S.ry, 0, rea));
+            botLog("реактор: охлаждение подтверждено (" + Math.round(frac * 100) + "%), ставлю Thorium Reactor");
+        }
+    }
+
+    /** Emergency fuel cut: a hot reactor with low coolant gets its fuel pulled. */
+    function proReactorWatch(data, team) {
+        seqEach(data.buildings, function (b) {
+            if (!b.block || String(b.block.name) !== "thorium-reactor") return;
+            var heat = typeof b.heat === "number" ? b.heat : 0;
+            var cryo = 0;
+            try { cryo = b.liquids.currentAmount() / Math.max(1, b.block.liquidCapacity); } catch (e) { cryo = 1; }
+            if (reactorShouldCutFuel(heat, cryo)) {
+                try { b.items.clear(); } catch (e) { /* fuel cut is best effort */ }
+                bot.pro.brain.markEvent("reactor");
+            }
+        });
+    }
+
+    // ---------------------------------------------------------- RTS helpers
+
+    function proEnemyCandidates(enemyData, core) {
+        var cands = [], turrets = 0, disarmed = 0, threats = [];
+        seqEach(enemyData.buildings, function (eb) {
+            if (!eb || !eb.block || cands.length >= 160) return;
+            var t = proTileOf(eb), b = eb.block, kind = null, powered = true;
+            var isTurret = b.targetGround !== undefined || !!b.ammoTypes;
+            if (b.outputsPower) kind = "generator";
+            else if (typeof b.maxNodes === "number") kind = "power-node";
+            else if (String(b.name).indexOf("battery") >= 0) kind = "battery";
+            else if (isTurret) {
+                kind = "turret"; turrets++;
+                var armed = true;
+                try { armed = typeof eb.hasAmmo === "function" ? eb.hasAmmo() : true; } catch (e) { armed = true; }
+                if (eb.power && typeof eb.power.status === "number" && eb.power.status < 0.05 && b.consumesPower) armed = false;
+                powered = armed;
+                if (!armed) disarmed++;
+                var rng = 0;
+                try { rng = eb.range ? eb.range() : 0; } catch (e) { rng = 0; }
+                threats.push({ x: t[0], y: t[1], r: Math.max(6, rng / Vars.tilesize + 2), weight: 1 });
+            } else if (b.plans) kind = "factory";
+            else if (typeof BlockGroup !== "undefined" && b.group === BlockGroup.transportation) kind = "ammo-feed";
+            if (kind) cands.push({ kind: kind, x: t[0], y: t[1], powered: powered, build: eb });
+        });
+        seqEach(enemyData.cores, function (ec) { var t = proTileOf(ec); cands.push({ kind: "core", x: t[0], y: t[1], powered: true, build: ec }); });
+        return { cands: cands, turrets: turrets, disarmed: disarmed, threats: threats };
+    }
+
+    function proAssaultCommand(ids, combat, core, team, enemyData, nowSec) {
+        var pro = bot.pro;
+        var info = proEnemyCandidates(enemyData, core);
+        pro.enemyKnown = info.cands.length > 0;
+        pro.enemyPower = 0;
+        for (var i = 0; i < info.cands.length; i++) if (info.cands[i].kind === "generator" || info.cands[i].kind === "power-node") pro.enemyPower++;
+        if (!info.cands.length) return null;
+        var ref = { x: core.tileX(), y: core.tileY() };
+        var pick = pickAssaultTarget(info.cands, ref, { turrets: info.turrets, disarmed: info.disarmed });
+        if (pick < 0) return null;
+        var target = info.cands[pick];
+        var cx = 0, cy = 0, groundN = 0;
+        for (var u = 0; u < combat.length; u++) {
+            cx += combat[u].x; cy += combat[u].y;
+            if (!combat[u].isFlying()) groundN++;
+        }
+        cx = Math.round(cx / combat.length / Vars.tilesize); cy = Math.round(cy / combat.length / Vars.tilesize);
+        var key = target.kind + ":" + target.x + ":" + target.y;
+        var w = Vars.world.width(), h = Vars.world.height();
+        if (pro.routeKey !== key || nowSec - pro.routeAt > 25) {
+            var danger = buildDangerGrid(w, h, info.threats);
+            var ground = groundN * 2 >= combat.length && pro.scan && pro.scan.passable ? pro.scan.passable : null;
+            pro.route = planFlankRoute(w, h, danger, ground, cx, cy, target.x, target.y, {});
+            if (pro.routeKey !== key) pro.routeIdx = 0;
+            pro.routeKey = key; pro.routeAt = nowSec;
+            if (pro.route.useFlank) botLog("штурм: обход по флангу к цели «" + target.kind + "» (" + pro.route.waypoints.length / 2 + " точек)");
+        }
+        var wp = pro.route.waypoints;
+        while (pro.routeIdx * 2 + 3 < wp.length && distPointToPoint(cx, cy, wp[pro.routeIdx * 2], wp[pro.routeIdx * 2 + 1]) < 8) pro.routeIdx++;
+        var last = pro.routeIdx * 2 + 2 >= wp.length;
+        return { target: target, wx: wp[pro.routeIdx * 2], wy: wp[pro.routeIdx * 2 + 1], last: last, flank: pro.route.useFlank, threats: info.threats.length };
+    }
+
+    function proRepairSpot(team, core) {
+        var best = null, bd = 1e12;
+        var data = Vars.state.teams.get(team);
+        if (!data) return null;
+        seqEach(data.buildings, function (b) {
+            if (!b.block) return;
+            var nm = String(b.block.name);
+            if (nm !== "repair-point" && nm !== "mend-projector") return;
+            var d = b.dst(core);
+            if (d < bd) { bd = d; best = b; }
+        });
+        return best ? new Vec2(best.x, best.y) : new Vec2(core.x, core.y);
+    }
+
+    function proWantAa(plan) {
+        var pro = bot.pro;
+        if (pro.aaBuilt >= 2 && !(pro.breach && pro.breach.air && pro.breachHandled !== pro.breach.wave)) return false;
+        if (plan && plan.priority === "BUILD_AA_SHIELD") return true;
+        var sc = pro.sched;
+        var wave = Vars.state.wave || 1;
+        if (sc && sc.nextAirWave > 0 && sc.nextAirWave - wave <= 2) return true;
+        return pro.heat.total > 0 && pro.heat.airShare() >= 0.5;
+    }
+
+    function proNearBus(b) {
+        var bp = bot.pro.busPlan;
+        if (!bp || !bp.spine0) return false;
+        var reach = (bot.pro.kill ? bot.pro.kill.spineLen : 9) + 8;
+        return distPointToPoint(b.x / Vars.tilesize, b.y / Vars.tilesize, bp.spine0[0], bp.spine0[1]) <= reach;
+    }
+
+    function proIncome(stock, nowSec) {
+        var pro = bot.pro;
+        var snap = pro.itemSnap;
+        if (!snap) { pro.itemSnap = { t: nowSec, items: stock }; pro.income = {}; return pro.income; }
+        if (nowSec - snap.t >= 20) {
+            var inc = {}, keys = Object.keys(stock);
+            for (var i = 0; i < keys.length; i++) inc[keys[i]] = (stock[keys[i]] - (snap.items[keys[i]] || 0)) / (nowSec - snap.t);
+            pro.income = inc;
+            pro.itemSnap = { t: nowSec, items: stock };
+        }
+        return pro.income || {};
+    }
+
+    var PRO_TURRET_NAMES = ["duo", "hail", "scatter", "lancer", "salvo", "ripple", "cyclone", "swarmer", "spectre", "fuse", "arc", "scorch"];
+
+    function proBuildSit(core, data, team, netPower, usableMap, stock, nowSec) {
+        var pro = bot.pro;
+        var wave = Vars.state.wave || 0;
+        if (!pro.sched || pro.schedWave !== wave) {
+            pro.sched = analyzeWaveSchedule(proWaveGroups(), Math.max(0, wave - 1), 5, 150);
+            pro.schedWave = wave;
+        }
+        var turrets = 0, aa = 0;
+        seqEach(data.buildings, function (b) {
+            if (!b.block) return;
+            if (b.block.ammoTypes || (b.block.targetGround !== undefined && b.estimateDps)) turrets++;
+            var nm = String(b.block.name);
+            if (nm === "scatter" || nm === "cyclone" || nm === "swarmer") aa++;
+        });
+        pro.aaBuilt = aa;
+        var avail = [];
+        for (var i = 0; i < PRO_TURRET_NAMES.length; i++) if (usableMap[PRO_TURRET_NAMES[i]]) avail.push(PRO_TURRET_NAMES[i]);
+        var ch = pro.choke;
+        var breach = pro.breach && pro.breachHandled !== pro.breach.wave ? { air: pro.breach.air, flank: pro.breach.flank, amount: pro.breach.amount } : null;
+        var v1Done = !pro.choke && turrets >= 4;
+        var fortressBuilt = pro.choke ? (pro.fortTotal > 0 && pro.fortSat >= pro.fortTotal * 0.85) : v1Done;
+        var sit = {
+            attackMode: !!Vars.state.rules.attackMode, sectorName: pro.sectorKey || "?", wave: wave, winWave: Vars.state.rules.winWave || 0,
+            enemies: Vars.state.enemies || 0, coreName: String(core.block.name).replace("core-", ""),
+            items: stock, income: proIncome(stock, nowSec), power: netPower / 60, forecast: pro.sched,
+            chokeCount: pro.chokes.length, chokeWidth: ch ? ch.width : 0, chokeDist: ch ? ch.dist : 0,
+            chokeFlank: ch ? compassFlank(ch.cx - core.tileX(), ch.cy - core.tileY()) : "any",
+            weakFlank: pro.heat.total > 0 ? pro.heat.dominantFlank(core.tileX(), core.tileY()) : "",
+            breach: breach, fortressBuilt: fortressBuilt, aaBuilt: aa >= 2, busBuilt: pro.busBuilt,
+            turrets: turrets, defenseDps: pro.lastDps || 0, armyUnits: pro.armyCount || 0,
+            turretsAvailable: avail, aaAvailable: !!(usableMap["scatter"] || usableMap["cyclone"] || usableMap["salvo"]),
+            busPossible: !!(pro.kill && usableMap["router"] && usableMap["junction"] && pro.busFails < 3),
+            smelterAvailable: usable(Blocks.siliconSmelter), airChainAvailable: usable(Blocks.airFactory) && usable(Blocks.additiveReconstructor),
+            enemyBaseKnown: !!pro.enemyKnown, enemyPowerNodes: pro.enemyPower || 0,
+            canCallWave: !!Vars.state.rules.waves && !!Vars.state.rules.waveSending && !Vars.state.rules.attackMode,
+            itemUnlocked: null
+        };
+        pro.lastSit = sit;
+        return sit;
+    }
+
     function thinkInSector(unit) {
         var nowSec = Time.time / 60;
         var sector = Vars.state.getSector();
@@ -3472,6 +4301,10 @@ function installMindustryCampaignBot() {
         var core = Vars.player.closestCore();
         if (!core) { bot.lastAction = "ожидание ядра..."; return; }
         var data = Vars.state.teams.get(team);
+
+        proEnterSector(sector, core, nowSec);
+        proStepScan(core);
+        proSafe("тепловая карта", function () { proUpdateHeat(data, team, core, nowSec); }, null);
 
         maintainFactoriesAndPower(data, team);
         updateArmySquads(data, core, team, sector);
@@ -3556,19 +4389,40 @@ function installMindustryCampaignBot() {
         });
         obs.powerNeeded = usable(Blocks.powerNode) && (!!unpowered || (gens === 0 && obs.drills >= 3 && usable(Blocks.combustionGenerator)) || (netPower < 90 && gens < 10));
 
+        var usableMap = proSafe("блоки", proUsableMap, {});
+        var stockMap = proSafe("склад", function () { return proStockMap(core); }, {});
+        var sit = proSafe("оценка ситуации", function () { return proBuildSit(core, data, team, netPower, usableMap, stockMap, nowSec); }, null);
+        var brainPlan = sit ? proSafe("мозг", function () { return bot.pro.brain.update(sit); }, null) : null;
+        bot.pro.plan = brainPlan;
+        if (brainPlan) { obs.priority = brainPlan.priority; obs.aggression = brainPlan.aggression; }
+        proSafe("шина", function () { proRetuneBus(team, nowSec); }, null);
+        proSafe("реактор", function () { proReactorWatch(data, team); }, null);
+
         if (obs.buildQueue === 0 && !obs.rearmInProgress) {
             var size = WINDOW_RADIUS * 2 + 1;
             var cells = [], ore = [];
             var origin = buildWindow(core, team, cells, ore);
             var hasUnloader = usable(Blocks.unloader);
+            proSafe("зоны ядра", function () {
+                applyCoreZones(size, size, cells, WINDOW_RADIUS, WINDOW_RADIUS, core.block.size, 12,
+                    core.block.size === 4 && usable(Blocks.coreNucleus), ore);
+            }, 0);
 
             // 1. Rearm check
             var bestRearmDst = 1e12;
             seqEach(data.buildings, function (b) {
                 if (!b.block || !b.block.ammoTypes || typeof b.totalAmmo !== "number") return;
                 if (b.totalAmmo >= b.block.maxAmmo * REARM_FRACTION) return;
+                // bus-fed turrets are only hand-fed in an emergency (<15% ammo)
+                if (bot.pro.busBuilt && b.totalAmmo >= b.block.maxAmmo * 0.15 && proNearBus(b)) return;
                 var bestIt = null, bestAmt = 0;
-                seqEach(b.block.ammoTypes.keys().toSeq(), function (it) {
+                var proAmmo = proSafe("боеприпас", function () {
+                    return chooseAmmoItem(String(b.block.name), stockMap, null, brainPlan ? brainPlan.ammo : "");
+                }, null);
+                var proAmmoItem = proAmmo ? proItem(proAmmo) : null;
+                if (proAmmoItem && b.block.ammoTypes.containsKey && b.block.ammoTypes.containsKey(proAmmoItem)) {
+                    bestIt = proAmmoItem; bestAmt = core.items.get(proAmmoItem);
+                } else seqEach(b.block.ammoTypes.keys().toSeq(), function (it) {
                     var hv = core.items.get(it);
                     if (hv >= MIN_AMMO_STOCK && hv > bestAmt) { bestAmt = hv; bestIt = it; }
                 });
@@ -3634,70 +4488,90 @@ function installMindustryCampaignBot() {
             });
             obs.rebuildSlots = rebPlans.length;
 
-            // 5. Fortress defense
+            // 5. Fortress defense (v2.0: chokepoint kill-box, AA corridor, ammo bus; v1 template as fallback)
             if (!captured) {
-                var threats = [];
-                seqEach(Vars.spawner.getSpawns(), function (sp) { threats.push([sp.worldx(), sp.worldy()]); });
-                var enemyTeamData = Vars.state.teams.get(Vars.state.rules.waveTeam);
-                if (enemyTeamData) seqEach(enemyTeamData.cores, function (ec) { threats.push([ec.x, ec.y]); });
+                var kb = proSafe("укрепрайон", function () { return proKillBox(core, budget, stockMap, netPower, usableMap); }, null);
+                if (kb) {
+                    var fort = { turrets: [], walls: [] };
+                    proSafe("укрепрайон", function () { proPlanFortress(team, budget, kb, bot.pro.kit, usableMap, fort); }, null);
+                    var aaPlans = [], busPlans = [], brPlans = [];
+                    var wantAa = proWantAa(brainPlan);
+                    if (wantAa) proSafe("ПВО", function () { proAaPlans(core, team, budget, usableMap, stockMap, data, aaPlans); }, null);
+                    proSafe("шина", function () { proPlanBus(core, team, budget, cells, origin, size, kb, bot.pro.kit, usableMap, stockMap, busPlans); }, null);
+                    proSafe("пробитие", function () { proBreachPlans(core, team, budget, usableMap, brPlans); }, null);
+                    var groups = brainPlan && brainPlan.priority === "BUILD_AMMO_BUS" ? [brPlans, aaPlans, busPlans, fort.turrets, fort.walls]
+                        : [brPlans, aaPlans, fort.turrets, busPlans, fort.walls];
+                    for (var gi = 0; gi < groups.length && defPlans.length === 0; gi++) defPlans = groups[gi];
+                } else {
+                    var aaOnly = [];
+                    if (proWantAa(brainPlan)) proSafe("ПВО", function () { proAaPlans(core, team, budget, usableMap, stockMap, data, aaOnly); }, null);
+                    if (aaOnly.length) defPlans = aaOnly;
+                }
+                var scanning = !!(bot.pro.scan && !bot.pro.scanDone) && (Vars.state.wave || 0) < 3 && !(Vars.state.enemies > 0);
+                if (!kb && !scanning && defPlans.length === 0) {
+                    var threats = [];
+                    seqEach(Vars.spawner.getSpawns(), function (sp) { threats.push([sp.worldx(), sp.worldy()]); });
+                    var enemyTeamData = Vars.state.teams.get(Vars.state.rules.waveTeam);
+                    if (enemyTeamData) seqEach(enemyTeamData.cores, function (ec) { threats.push([ec.x, ec.y]); });
 
-                var pickFirst = function (arr) {
-                    for (var ii = 0; ii < arr.length; ii++) if (usable(arr[ii])) return arr[ii];
-                    return null;
-                };
-                var wallB = pickFirst([Blocks.surgeWall, Blocks.thoriumWall, Blocks.plastaniumWall, Blocks.titaniumWall, Blocks.copperWall]);
-                var gTurret = pickFirst([Blocks.salvo, Blocks.lancer, Blocks.scorch, Blocks.hail, Blocks.arc, Blocks.duo]);
-                var aTurret = pickFirst([Blocks.swarmer, Blocks.salvo, Blocks.scatter, Blocks.duo]);
-                var supB = pickFirst([Blocks.mendProjector, Blocks.mender]);
-
-                for (var ti = 0; ti < threats.length && defPlans.length === 0; ti++) {
-                    var dx = threats[ti][0] - core.x, dy = threats[ti][1] - core.y;
-                    var tLen = Math.max(1, Math.sqrt(dx * dx + dy * dy));
-                    var rDist = Math.min(tLen * 0.45, 22 * Vars.tilesize);
-                    var fcx = Math.max(6, Math.min(Vars.world.width() - 7, Math.round((core.x + (dx / tLen) * rDist) / Vars.tilesize)));
-                    var fcy = Math.max(6, Math.min(Vars.world.height() - 7, Math.round((core.y + (dy / tLen) * rDist) / Vars.tilesize)));
-
-                    var locDps = 0;
-                    seqEach(data.buildings, function (b) {
-                        if (b.estimateDps && b.within(fcx * Vars.tilesize, fcy * Vars.tilesize, (b.range ? b.range() : 80) + 24)) {
-                            locDps += b.estimateDps();
-                        }
-                    });
-                    if (locDps >= 75 + Vars.state.wave * 18) continue;
-
-                    var tpl = buildFortressTemplate(fcx, fcy, dx, dy);
-                    var takenDef = {};
-                    var slotSatisfied = function (sx, sy, role) {
-                        for (var sdy = -1; sdy <= 1; sdy++) {
-                            for (var sdx = -1; sdx <= 1; sdx++) {
-                                var tl = Vars.world.tile(sx + sdx, sy + sdy);
-                                if (!tl || !tl.build || tl.build.team !== team) continue;
-                                var bb = tl.build.block;
-                                if (role === ROLE_WALL && typeof BlockGroup !== "undefined" && bb.group === BlockGroup.walls && sdx === 0 && sdy === 0) return true;
-                                if ((role === ROLE_GROUND_TURRET || role === ROLE_AIR_TURRET) && (bb.ammoTypes || bb.targetGround !== undefined)) return true;
-                                if (role === ROLE_SUPPORT && (bb === Blocks.mender || bb === Blocks.mendProjector)) return true;
-                                if (role === ROLE_POWER_NODE && typeof bb.maxNodes === "number") return true;
-                            }
-                        }
-                        return false;
+                    var pickFirst = function (arr) {
+                        for (var ii = 0; ii < arr.length; ii++) if (usable(arr[ii])) return arr[ii];
+                        return null;
                     };
-                    for (var si = 0; si < tpl.length / 3 && defPlans.length < MAX_DEFENSE_PLANS_PER_CYCLE; si++) {
-                        var stx = tpl[si * 3], sty = tpl[si * 3 + 1], role = tpl[si * 3 + 2];
-                        if (slotSatisfied(stx, sty, role)) continue;
-                        var blk = role === ROLE_WALL ? wallB : role === ROLE_GROUND_TURRET ? gTurret : role === ROLE_AIR_TURRET ? aTurret : role === ROLE_SUPPORT ? supB : (usable(Blocks.powerNode) ? Blocks.powerNode : null);
-                        if (!blk) continue;
-                        var spSpot = findSpotNear(blk, team, stx, sty, 2);
-                        if (!spSpot) continue;
-                        var defKey = packCoord(spSpot[0], spSpot[1]);
-                        if (takenDef[defKey]) continue;
-                        if (reserve(budget, blk, 1)) {
-                            var bOff = sizeOffset(blk.size);
-                            for (var tdy = 0; tdy < blk.size; tdy++) {
-                                for (var tdx = 0; tdx < blk.size; tdx++) {
-                                    takenDef[packCoord(spSpot[0] + bOff + tdx, spSpot[1] + bOff + tdy)] = true;
+                    var wallB = pickFirst([Blocks.surgeWall, Blocks.thoriumWall, Blocks.plastaniumWall, Blocks.titaniumWall, Blocks.copperWall]);
+                    var gTurret = pickFirst([Blocks.salvo, Blocks.lancer, Blocks.scorch, Blocks.hail, Blocks.arc, Blocks.duo]);
+                    var aTurret = pickFirst([Blocks.swarmer, Blocks.salvo, Blocks.scatter, Blocks.duo]);
+                    var supB = pickFirst([Blocks.mendProjector, Blocks.mender]);
+
+                    for (var ti = 0; ti < threats.length && defPlans.length === 0; ti++) {
+                        var dx = threats[ti][0] - core.x, dy = threats[ti][1] - core.y;
+                        var tLen = Math.max(1, Math.sqrt(dx * dx + dy * dy));
+                        var rDist = Math.min(tLen * 0.45, 22 * Vars.tilesize);
+                        var fcx = Math.max(6, Math.min(Vars.world.width() - 7, Math.round((core.x + (dx / tLen) * rDist) / Vars.tilesize)));
+                        var fcy = Math.max(6, Math.min(Vars.world.height() - 7, Math.round((core.y + (dy / tLen) * rDist) / Vars.tilesize)));
+
+                        var locDps = 0;
+                        seqEach(data.buildings, function (b) {
+                            if (b.estimateDps && b.within(fcx * Vars.tilesize, fcy * Vars.tilesize, (b.range ? b.range() : 80) + 24)) {
+                                locDps += b.estimateDps();
+                            }
+                        });
+                        if (locDps >= 75 + Vars.state.wave * 18) continue;
+
+                        var tpl = buildFortressTemplate(fcx, fcy, dx, dy);
+                        var takenDef = {};
+                        var slotSatisfied = function (sx, sy, role) {
+                            for (var sdy = -1; sdy <= 1; sdy++) {
+                                for (var sdx = -1; sdx <= 1; sdx++) {
+                                    var tl = Vars.world.tile(sx + sdx, sy + sdy);
+                                    if (!tl || !tl.build || tl.build.team !== team) continue;
+                                    var bb = tl.build.block;
+                                    if (role === ROLE_WALL && typeof BlockGroup !== "undefined" && bb.group === BlockGroup.walls && sdx === 0 && sdy === 0) return true;
+                                    if ((role === ROLE_GROUND_TURRET || role === ROLE_AIR_TURRET) && (bb.ammoTypes || bb.targetGround !== undefined)) return true;
+                                    if (role === ROLE_SUPPORT && (bb === Blocks.mender || bb === Blocks.mendProjector)) return true;
+                                    if (role === ROLE_POWER_NODE && typeof bb.maxNodes === "number") return true;
                                 }
                             }
-                            defPlans.push(new BuildPlan(spSpot[0], spSpot[1], 0, blk));
+                            return false;
+                        };
+                        for (var si = 0; si < tpl.length / 3 && defPlans.length < MAX_DEFENSE_PLANS_PER_CYCLE; si++) {
+                            var stx = tpl[si * 3], sty = tpl[si * 3 + 1], role = tpl[si * 3 + 2];
+                            if (slotSatisfied(stx, sty, role)) continue;
+                            var blk = role === ROLE_WALL ? wallB : role === ROLE_GROUND_TURRET ? gTurret : role === ROLE_AIR_TURRET ? aTurret : role === ROLE_SUPPORT ? supB : (usable(Blocks.powerNode) ? Blocks.powerNode : null);
+                            if (!blk) continue;
+                            var spSpot = findSpotNear(blk, team, stx, sty, 2);
+                            if (!spSpot) continue;
+                            var defKey = packCoord(spSpot[0], spSpot[1]);
+                            if (takenDef[defKey]) continue;
+                            if (reserve(budget, blk, 1)) {
+                                var bOff = sizeOffset(blk.size);
+                                for (var tdy = 0; tdy < blk.size; tdy++) {
+                                    for (var tdx = 0; tdx < blk.size; tdx++) {
+                                        takenDef[packCoord(spSpot[0] + bOff + tdx, spSpot[1] + bOff + tdy)] = true;
+                                    }
+                                }
+                                defPlans.push(new BuildPlan(spSpot[0], spSpot[1], 0, blk));
+                            }
                         }
                     }
                 }
@@ -3764,7 +4638,7 @@ function installMindustryCampaignBot() {
             // 7. Industry chains
             var tryChain = [
                 [Blocks.graphitePress, null, Items.graphite, 800, 2],
-                [Blocks.siliconSmelter, null, Items.silicon, 1800, 3],
+                [Blocks.siliconSmelter, null, Items.silicon, 1800, obs.priority === "EXPAND_SILICON_ECONOMY" ? 5 : 3],
                 [Blocks.kiln, null, Items.metaglass, 700, 2],
                 [Blocks.cultivator, Blocks.waterExtractor, Items.sporePod, 500, 2],
                 [Blocks.cryofluidMixer, Blocks.waterExtractor, null, 0, 1],
@@ -3783,9 +4657,65 @@ function installMindustryCampaignBot() {
                 var iLbl = tryPlanHubBlock(origin, size, cells, ore, team, budget, cBlk, hasUnloader, supBlk, indPlans);
                 if (iLbl) { obs.industryPossible = true; indLbl = iLbl; break; }
             }
+            if (!obs.industryPossible) {
+                proSafe("реактор", function () {
+                    proReactorPlans(core, team, budget, usableMap, stockMap, data, netPower, cells, origin, size, indPlans);
+                    if (indPlans.length) { obs.industryPossible = true; indLbl = "Thorium Reactor + криомиксер"; }
+                }, null);
+            }
+
+            // 8a. v2.0 unit chains up to T4/T5 (heavy sectors)
+            if (netPower >= 15 && core.items.get(Items.silicon) >= 45 && (obs.attackMode || obs.priority === "BUILD_T3_AIR_FLANK" || obs.priority === "BUILD_ARMY")) {
+                proSafe("цепочка юнитов", function () {
+                    var diffNow = sector && sector.preset ? sector.preset.difficulty : 4;
+                    var unlockedMap = {};
+                    var uNames = Object.keys(UNIT_LINES);
+                    for (var ul = 0; ul < uNames.length; ul++) {
+                        var arr = UNIT_LINES[uNames[ul]];
+                        for (var ua = 0; ua < arr.length; ua++) {
+                            var ut = UnitTypes[arr[ua]];
+                            unlockedMap[arr[ua]] = !!(ut && ut.unlockedNow && ut.unlockedNow());
+                        }
+                    }
+                    var bnames = ["ground-factory", "air-factory", "naval-factory", "additive-reconstructor", "multiplicative-reconstructor", "exponential-reconstructor", "tetrative-reconstructor"];
+                    for (var bn = 0; bn < bnames.length; bn++) unlockedMap[bnames[bn]] = !!usableMap[bnames[bn]];
+                    var fc = bot.pro.sched;
+                    var preferAir = obs.priority === "BUILD_T3_AIR_FLANK" || !!(fc && fc.airShareNext >= 0.5);
+                    var line = chooseUnitLine(diffNow, unlockedMap, preferAir, bot.pro.scan && bot.pro.scan.counts && !!bot.pro.scan.counts["water"]);
+                    if (!line || line.tiers < 3) return;
+                    var facB = proBlock(line.factory);
+                    if (!facB || countBlock(data, facB) >= 2) return;
+                    for (var tiers = line.tiers; tiers >= 3; tiers--) {
+                        var chain = findUnitChainSlotTiers(size, size, cells, WINDOW_RADIUS, WINDOW_RADIUS, hasUnloader, tiers);
+                        if (!chain) continue;
+                        var work = budget.slice(), list = [], good = true;
+                        for (var st = 0; st < chain.stages.length && good; st++) {
+                            var stg = chain.stages[st];
+                            var sb = st === 0 ? facB : (stg.kind === "payload" ? proBlock("payload-conveyor") : proBlock(stg.kind));
+                            var sx = origin[0] + stg.cx, sy = origin[1] + stg.cy;
+                            if (!sb || !usable(sb) || !Build.validPlace(sb, team, sx, sy, chain.rotation) || !reserve(work, sb, 1)) { good = false; break; }
+                            var cfg = null;
+                            if (st === 0 && sb.plans) {
+                                var want = UnitTypes[line.chain[0]];
+                                for (var pi = 0; pi < sb.plans.size; pi++) if (sb.plans.get(pi).unit === want) cfg = java.lang.Integer.valueOf(pi);
+                            }
+                            list.push(new BuildPlan(sx, sy, chain.rotation, sb, cfg));
+                        }
+                        if (!good) continue;
+                        if (chain.hasUnloader && usable(Blocks.unloader) && reserve(work, Blocks.unloader, 1)) {
+                            list.push(new BuildPlan(origin[0] + chain.unloaderX, origin[1] + chain.unloaderY, 0, Blocks.unloader));
+                        }
+                        for (var bi = 0; bi < work.length; bi++) budget[bi] = work[bi];
+                        for (var li = 0; li < list.length; li++) armPlans.push(list[li]);
+                        obs.armyPossible = true;
+                        armLbl = line.chain[line.chain.length - 1] + " (T" + tiers + ")";
+                        break;
+                    }
+                }, null);
+            }
 
             // 8. Army + Reconstructors
-            if (netPower >= 15 && core.items.get(Items.silicon) >= 45) {
+            if (!obs.armyPossible && netPower >= 15 && core.items.get(Items.silicon) >= 45) {
                 var fac = null, t2 = null, t3 = null;
                 if (usable(Blocks.airFactory) && countBlock(data, Blocks.airFactory) < (obs.attackMode ? 2 : 1)
                     && (UnitTypes.mono.unlockedNow() || UnitTypes.flare.unlockedNow())) {
@@ -3891,6 +4821,9 @@ function installMindustryCampaignBot() {
         });
         obs.defenseDps = defDps;
         obs.defensePoolHp = defHp;
+        bot.pro.lastDps = defDps;
+        if ((bot.pro.prevEnemies || 0) > 0 && obs.enemies === 0) proSafe("разбор волны", function () { proAfterWave(core); }, null);
+        bot.pro.prevEnemies = obs.enemies;
 
         var wHp = 0, wDps = 0, wIdx = Math.max(0, obs.wave - 1);
         seqEach(Vars.state.rules.spawns, function (grp) {
@@ -4044,10 +4977,20 @@ function installMindustryCampaignBot() {
             : Vars.state.rules.winWave > 0 ? " (волна " + Vars.state.wave + "/" + Vars.state.rules.winWave + ")"
             : sec.isCaptured() ? " [accent](захвачен)[]" : "");
         var detail = bot.state === BOT_RUNNING ? bot.lastAction : (bot.reason || bot.lastAction);
-        return formatHudText(bot.state, prog[0], prog[1], secTitle, bot.lastAction, bot.lastResearch, bot.armySummary, detail);
+        var thought = "";
+        if (bot.state === BOT_RUNNING && Vars.state && Vars.state.isGame() && Vars.state.isCampaign()) {
+            thought = bot.pro.brain.hudLine() + "\n[lightgray]🧠 " + bot.pro.brain.status
+                + (bot.pro.recon ? " · " + bot.pro.recon : "") + "[]";
+        }
+        return formatHudText(bot.state, prog[0], prog[1], secTitle, bot.lastAction, bot.lastResearch, bot.armySummary, detail, thought);
+    }
+
+    function llmButtonText() {
+        return "🧠 ИИ: Gemma " + (llmSettingBool(PREF_LLM_ENABLED, true) ? "[green]вкл[]" : "[scarlet]выкл[]");
     }
 
     function refreshUi() {
+        if (llmButton) { try { llmButton.setText(llmButtonText()); } catch (ignored) {} }
         if (hudLabel) hudLabel.setText(composeHudString());
         if (planetLabel) {
             var prog = countPresetProgress();
@@ -4114,6 +5057,8 @@ function installMindustryCampaignBot() {
             bot.capturedSinceSec = -1;
             bot.settleUntilTime = Time.time + 90;
             bot.transitionPending = false;
+            bot.pro.sectorKey = null;
+            bot.pro.prevHp = {};
         }));
 
         if (typeof SectorCaptureEvent !== "undefined") {
@@ -4172,6 +5117,8 @@ function installMindustryCampaignBot() {
                                 if (bodyTable) bodyTable.visible = !bot.collapsed;
                             })).width(32);
                         })).width(contentW).left();
+                        panel.row();
+                        llmButton = panel.button(llmButtonText(), Styles.flatt, asRun(toggleLlm)).growX().height(26).left().get();
                         panel.row();
                         bodyTable = panel.table(asCons(function (body) {
                             hudLabel = body.add(composeHudString()).color(Color.white).left().width(contentW).get();
@@ -4352,6 +5299,14 @@ if (typeof module !== "undefined" && module.exports) {
         LLM_PLANS: LLM_PLANS,
         LLM_DEFAULT_URL: LLM_DEFAULT_URL,
         LLM_DEFAULT_MODEL: LLM_DEFAULT_MODEL,
+        WALL_TIERS: WALL_TIERS,
+        KIT_MAIN: KIT_MAIN,
+        KIT_FRONT: KIT_FRONT,
+        pickFortressWalls: pickFortressWalls,
+        chooseFortressKit: chooseFortressKit,
+        findBusUnloaderCell: findBusUnloaderCell,
+        applyCoreZones: applyCoreZones,
+        kebabToCamel: kebabToCamel,
         installMindustryCampaignBot: installMindustryCampaignBot
     };
 }

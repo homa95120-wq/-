@@ -487,3 +487,7 @@ assert.ok(!SectorPresets.taintedWoods.sector.isCaptured(), "Optional non-victory
 
 console.log(`test-campaign-sim.js OK: Full Serpulo campaign completed in ${launches.length} sector launches!`);
 console.log("Launch sequence:", launches.map(l => l.to).join(" -> "));
+
+// v2.0: the pro in-sector runtime (recon, chokepoint kill-box, ammo bus, AA, Gemma brain with fallback)
+// is exercised on a synthetic rocky map through the real thinkInSector() glue.
+require("./test-pro-sector.js");

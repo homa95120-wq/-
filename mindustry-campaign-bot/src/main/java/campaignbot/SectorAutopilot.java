@@ -1777,22 +1777,22 @@ public class SectorAutopilot{
     }
 
     private float[] computeDefenseStats(TeamData data, Team team){
-        float dps = 0f, hp = 0f;
+        float[] stats = {0f, 0f};
         for(Building b : data.buildings){
             if(b instanceof TurretBuild tb && tb.hasAmmo()){
-                dps += tb.estimateDps();
-                hp += b.health;
+                stats[0] += tb.estimateDps();
+                stats[1] += b.health;
             }else if(b.block.group == BlockGroup.walls){
-                hp += b.health;
+                stats[1] += b.health;
             }
         }
         Groups.unit.each(u -> {
             if(u.team == team && !u.dead() && u.type != null && u.type.canAttack){
-                dps += u.type.estimateDps();
-                hp += u.health * 0.5f;
+                stats[0] += u.type.estimateDps();
+                stats[1] += u.health * 0.5f;
             }
         });
-        return new float[]{dps, hp};
+        return stats;
     }
 
     private float[] computeNextWaveStats(int waveIndex){

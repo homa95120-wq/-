@@ -1,0 +1,581 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Mindustry: Serpulo — ПК & ESP32-S3 (C++17 Q16.16 simcore)</title>
+<style>
+  :root {
+    --bg: #111319;
+    --panel: rgba(20, 23, 31, 0.94);
+    --gold: #ffd37f;
+    --border: rgba(255, 211, 127, 0.45);
+    --text: #eef1f7;
+    --muted: #9aa5bc;
+    --danger: #ff6b6b;
+    --ok: #78f0a5;
+  }
+  * { box-sizing: border-box; user-select: none; }
+  html, body {
+    margin: 0; padding: 0; width: 100%; height: 100%;
+    overflow: hidden; background: var(--bg); color: var(--text);
+    font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+  }
+  #gameCanvas { display: block; width: 100vw; height: 100vh; cursor: crosshair; }
+
+  #topBar {
+    position: fixed; top: 0; left: 0; right: 0; height: 56px;
+    background: var(--panel); border-bottom: 2px solid var(--border);
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 0 14px; gap: 12px; z-index: 10;
+  }
+  .res-list { display: flex; gap: 12px; align-items: center; flex-wrap: nowrap; overflow-x: auto; }
+  .res-pill {
+    display: flex; align-items: center; gap: 6px;
+    background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.08);
+    padding: 4px 8px; border-radius: 5px; font-size: 12px; white-space: nowrap;
+  }
+  .swatch { width: 11px; height: 11px; border-radius: 2px; flex-shrink: 0; }
+  .res-val { font-weight: 700; color: #fff; font-variant-numeric: tabular-nums; }
+
+  .top-actions { display: flex; gap: 7px; align-items: center; flex-shrink: 0; }
+  button.btn {
+    background: #242938; color: var(--text); border: 1px solid var(--border);
+    padding: 6px 11px; border-radius: 5px; font-size: 12px; font-weight: 600;
+    cursor: pointer; transition: 0.12s;
+  }
+  button.btn:hover { background: #333b50; }
+  button.btn.active { background: #4a4122; color: var(--gold); border-color: var(--gold); }
+  button.btn.danger { background: #482328; border-color: #ff8585; }
+  button.btn.esp-on { background: #1d4e3f; border-color: var(--ok); color: var(--ok); }
+
+  #hudStats {
+    position: fixed; top: 64px; left: 12px;
+    background: var(--panel); border: 1px solid rgba(255,255,255,0.12);
+    border-radius: 6px; padding: 8px 12px; font-size: 12px; line-height: 1.55;
+    z-index: 9; pointer-events: none;
+  }
+  #hudStats b { color: var(--gold); }
+
+  #minimapWrap {
+    position: fixed; top: 64px; right: 12px;
+    background: var(--panel); border: 2px solid var(--border);
+    border-radius: 6px; padding: 4px; z-index: 9;
+  }
+  #minimap { display: block; width: 156px; height: 156px; cursor: pointer; image-rendering: pixelated; }
+
+  #bottomBar {
+    position: fixed; bottom: 0; left: 0; right: 0;
+    background: var(--panel); border-top: 2px solid var(--border);
+    padding: 6px 12px 10px; z-index: 10;
+  }
+  .cat-tabs { display: flex; gap: 6px; margin-bottom: 6px; align-items: center; flex-wrap: wrap; }
+  .cat-tab {
+    background: #1f2431; border: 1px solid rgba(255,255,255,0.12);
+    color: var(--muted); padding: 4px 10px; border-radius: 4px; font-size: 12px;
+    font-weight: 600; cursor: pointer;
+  }
+  .cat-tab.active { background: #463d21; color: var(--gold); border-color: var(--gold); }
+  .hint-inline { margin-left: auto; font-size: 11px; color: var(--muted); }
+
+  .block-row { display: flex; gap: 7px; overflow-x: auto; padding-bottom: 2px; }
+  .blk-card {
+    min-width: 146px; background: #1c202c; border: 1px solid rgba(255,255,255,0.14);
+    border-radius: 5px; padding: 6px 8px; cursor: pointer; flex-shrink: 0;
+  }
+  .blk-card.active { background: #3b3520; border: 2px solid var(--gold); }
+  .blk-head { display: flex; align-items: center; gap: 7px; font-size: 12px; font-weight: 700; margin-bottom: 3px; }
+  .blk-cost { font-size: 11px; color: var(--muted); }
+
+  .modal-bg {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.7);
+    display: none; align-items: center; justify-content: center; z-index: 30;
+  }
+  .modal-bg.open { display: flex; }
+  .modal-box {
+    width: min(880px, 94vw); max-height: 84vh; overflow-y: auto;
+    background: #171a24; border: 2px solid var(--gold); border-radius: 8px; padding: 16px;
+  }
+  .modal-title { font-size: 16px; font-weight: 700; color: var(--gold); margin-bottom: 12px; display: flex; justify-content: space-between; }
+  .sector-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 8px; }
+  .sec-card {
+    background: #222736; border: 1px solid rgba(255,255,255,0.14);
+    border-radius: 5px; padding: 8px 10px; cursor: pointer;
+  }
+  .sec-card:hover, .sec-card.active { border-color: var(--gold); background: #363120; }
+  .esp-form { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 8px; }
+  .esp-form input {
+    background: #10131b; color: #fff; border: 1px solid var(--border);
+    padding: 7px 10px; border-radius: 4px; font-size: 13px; width: 240px;
+  }
+</style>
+</head>
+<body>
+
+<div id="topBar">
+  <div class="res-list" id="resBar"></div>
+  <div class="top-actions">
+    <button class="btn danger" id="btnWave" title="Space">⚔ Волна</button>
+    <button class="btn" id="btnPause" title="P">⏸ Пауза</button>
+    <button class="btn" id="btnSectors" title="M">🪐 Сектора (29)</button>
+    <button class="btn" id="btnSandbox" title="B">🔧 Песочница</button>
+    <button class="btn" id="btnEsp" title="F2">📡 ESP32-S3</button>
+  </div>
+</div>
+
+<div id="hudStats">Загрузка ядра C++17 Q16.16 simcore...</div>
+<div id="minimapWrap"><canvas id="minimap" width="128" height="128"></canvas></div>
+<canvas id="gameCanvas"></canvas>
+
+<div id="bottomBar">
+  <div class="cat-tabs" id="catTabs"></div>
+  <div class="block-row" id="blockRow"></div>
+</div>
+
+<div class="modal-bg" id="sectorModal">
+  <div class="modal-box">
+    <div class="modal-title">
+      <span>Планета Серпуло — 29 секторов Mindustry v160.7</span>
+      <button class="btn" onclick="closeModals()">✕ Закрыть</button>
+    </div>
+    <div class="sector-grid" id="sectorGrid"></div>
+  </div>
+</div>
+
+<div class="modal-bg" id="espModal">
+  <div class="modal-box" style="max-width:540px;">
+    <div class="modal-title">
+      <span>Подключение к серверу ESP32-S3 (протокол 0x4D53)</span>
+      <button class="btn" onclick="closeModals()">✕</button>
+    </div>
+    <p style="font-size:13px;color:var(--muted);margin:0 0 10px;">
+      По умолчанию работает локальное С++17 ядро <b>simcore (60 TPS)</b> на ПК. Вы можете подключиться к реальной плате
+      <b>ESP32-S3</b> (Wi-Fi AP <code>Mindustry-S3</code> / <code>serpulo123</code> → <code>192.168.4.1:26789</code>) или к локальному эмулятору <code>headless_runner --serve 26789</code>.
+    </p>
+    <div class="esp-form">
+      <input id="espAddr" value="192.168.4.1:26789" placeholder="host:port или /dev/ttyACM0" />
+      <button class="btn" onclick="connectEspTcp()">Подключить TCP</button>
+      <button class="btn danger" onclick="disconnectEsp()">Локальный ПК</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+const mmCanvas = document.getElementById('minimap');
+const mmCtx = mmCanvas.getContext('2d');
+
+let meta = null;
+let mapData = null;
+let state = null;
+let camX = 64, camY = 98, tilePx = 24;
+let curCat = 1, selBlock = 3, buildRot = 0;
+let keys = {};
+let lmbDown = false, rmbDown = false, mmbDown = false;
+let lastDragX = -1, lastDragY = -1, lastMouseX = 0, lastMouseY = 0;
+
+const CATS = [
+  { id: 1, title: '1: Буры' },
+  { id: 2, title: '2: Конвейеры' },
+  { id: 3, title: '3: Жидкости' },
+  { id: 4, title: '4: Энергия' },
+  { id: 5, title: '5: Заводы' },
+  { id: 6, title: '6: Стены' },
+  { id: 7, title: '7: Турели' }
+];
+const DIR_DX = [1, 0, -1, 0];
+const DIR_DY = [0, -1, 0, 1];
+const ROT_ARROWS = ['→ (+X)', '↑ (-Y)', '← (-X)', '↓ (+Y)'];
+
+function hexCol(n) { return '#' + (n >>> 0).toString(16).padStart(6, '0'); }
+
+function floorCol(fl, x, y, tick) {
+  const ch = ((x + y) & 1) ? 5 : 0;
+  switch (fl) {
+    case 0: return `rgb(${38+ch},${40+ch},${48+ch})`;
+    case 1: return `rgb(${182+ch},${152+ch},${114+ch})`;
+    case 2: return `rgb(${52+ch},${68+ch},${56+ch})`;
+    case 3: return `rgb(${186+ch},${198+ch},${214+ch})`;
+    case 4: return `rgb(${30+ch},${30+ch},${35+ch})`;
+    case 5: return 'rgb(28,30,38)';
+    case 6: { const w = (((tick >> 3) + x + y) & 3) * 4; return `rgb(${58+w},${84+w},${156+w})`; }
+    case 7: return 'rgb(38,56,122)';
+    case 8: { const g = (((tick >> 2) + x + y) & 3) * 8; return `rgb(235,${118+g},45)`; }
+    default: return '#282a33';
+  }
+}
+function wallCol(w) {
+  return w === 1 ? '#4a4e5c' : w === 2 ? '#58427c' : w === 3 ? '#8ea6c6' : '#886e52';
+}
+
+async function sendCmd(obj) {
+  await fetch('/api/cmd', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(obj)
+  });
+}
+
+async function loadMap() {
+  const r = await fetch('/api/map');
+  mapData = await r.json();
+  renderMinimapStatic();
+}
+
+let mmBgImage = null;
+function renderMinimapStatic() {
+  if (!mapData || !meta) return;
+  const img = mmCtx.createImageData(mapData.w, mapData.h);
+  for (let i = 0; i < mapData.w * mapData.h; i++) {
+    const fl = mapData.floor[i], wl = mapData.wall[i];
+    let r = 40, g = 42, b = 50;
+    if (wl) { r = 95; g = 98; b = 115; }
+    else if (fl === 1) { r = 182; g = 152; b = 114; }
+    else if (fl === 2) { r = 54; g = 70; b = 58; }
+    else if (fl === 3) { r = 188; g = 200; b = 216; }
+    else if (fl === 6 || fl === 7) { r = 56; g = 84; b = 156; }
+    else if (fl === 8) { r = 235; g = 125; b = 45; }
+    img.data[i*4] = r; img.data[i*4+1] = g; img.data[i*4+2] = b; img.data[i*4+3] = 255;
+  }
+  mmBgImage = img;
+}
+
+function rebuildPalette() {
+  if (!meta) return;
+  const tabs = document.getElementById('catTabs');
+  tabs.innerHTML = '';
+  for (const c of CATS) {
+    const b = document.createElement('div');
+    b.className = 'cat-tab' + (c.id === curCat ? ' active' : '');
+    b.textContent = c.title;
+    b.onclick = () => {
+      curCat = c.id;
+      const first = meta.blocks.find(x => x.cat === curCat);
+      if (first) selBlock = first.id;
+      rebuildPalette();
+    };
+    tabs.appendChild(b);
+  }
+  const hint = document.createElement('span');
+  hint.className = 'hint-inline';
+  hint.id = 'rotHint';
+  hint.textContent = `[R] Поворот: ${ROT_ARROWS[buildRot]}  |  ЛКМ: строить  ПКМ: снести  WASD/Колесо: камера`;
+  tabs.appendChild(hint);
+
+  const row = document.getElementById('blockRow');
+  row.innerHTML = '';
+  for (const blk of meta.blocks.filter(x => x.cat === curCat)) {
+    const d = document.createElement('div');
+    d.className = 'blk-card' + (blk.id === selBlock ? ' active' : '');
+    const costTxt = blk.cost.map(c => `${meta.items[c[0]].ru}:${c[1]}`).join(' ');
+    d.innerHTML = `
+      <div class="blk-head"><span class="swatch" style="background:${hexCol(blk.color)}"></span><span>${blk.ru} (${blk.size}×${blk.size})</span></div>
+      <div class="blk-cost">${costTxt || 'Бесплатно'}</div>`;
+    d.onclick = () => { selBlock = blk.id; rebuildPalette(); };
+    row.appendChild(d);
+  }
+}
+
+function rebuildSectors() {
+  if (!meta) return;
+  const g = document.getElementById('sectorGrid');
+  g.innerHTML = '';
+  for (const s of meta.sectors) {
+    const d = document.createElement('div');
+    d.className = 'sec-card' + (state && state.sector === s.id ? ' active' : '');
+    d.innerHTML = `<div style="font-weight:700;color:#fff">${s.ru} <span style="color:var(--gold)">#${s.num}</span></div>
+                   <div style="font-size:11px;color:var(--muted)">Сложность: ${s.diff}/10 • Волн захвата: ${s.waves || 'Выживание'}</div>`;
+    d.onclick = async () => {
+      await sendCmd({ cmd: 'sector', param: s.id });
+      await loadMap();
+      closeModals();
+    };
+    g.appendChild(d);
+  }
+}
+
+function closeModals() {
+  document.getElementById('sectorModal').classList.remove('open');
+  document.getElementById('espModal').classList.remove('open');
+}
+
+async function connectEspTcp() {
+  const addr = document.getElementById('espAddr').value.trim();
+  await sendCmd({ cmd: 'esp_tcp', addr });
+  setTimeout(loadMap, 250);
+  closeModals();
+}
+async function disconnectEsp() {
+  await sendCmd({ cmd: 'esp_off' });
+  await loadMap();
+  closeModals();
+}
+
+document.getElementById('btnWave').onclick = () => sendCmd({ cmd: 'wave' });
+document.getElementById('btnPause').onclick = () => sendCmd({ cmd: 'pause', arg: (state && (state.flags & 1)) ? 0 : 1 });
+document.getElementById('btnSandbox').onclick = () => sendCmd({ cmd: 'sandbox', arg: (state && (state.flags & 2)) ? 0 : 1 });
+document.getElementById('btnSectors').onclick = () => { rebuildSectors(); document.getElementById('sectorModal').classList.add('open'); };
+document.getElementById('btnEsp').onclick = () => document.getElementById('espModal').classList.add('open');
+
+function screenToTile(sx, sy) {
+  const wx = camX + (sx - canvas.width * 0.5) / tilePx;
+  const wy = camY + (sy - canvas.height * 0.5) / tilePx;
+  return [Math.floor(wx), Math.floor(wy)];
+}
+
+canvas.addEventListener('contextmenu', e => e.preventDefault());
+canvas.addEventListener('wheel', e => {
+  e.preventDefault();
+  tilePx *= (e.deltaY < 0) ? 1.14 : (1 / 1.14);
+  tilePx = Math.max(6, Math.min(64, tilePx));
+}, { passive: false });
+
+canvas.addEventListener('mousedown', e => {
+  lastMouseX = e.clientX; lastMouseY = e.clientY;
+  const [tx, ty] = screenToTile(e.clientX, e.clientY);
+  if (e.button === 1) { mmbDown = true; }
+  else if (e.button === 0) {
+    lmbDown = true; lastDragX = tx; lastDragY = ty;
+    sendCmd({ cmd: 'place', x: tx, y: ty, block: selBlock, rot: buildRot });
+  } else if (e.button === 2) {
+    rmbDown = true;
+    sendCmd({ cmd: 'remove', x: tx, y: ty });
+  }
+});
+window.addEventListener('mouseup', e => {
+  if (e.button === 1) mmbDown = false;
+  if (e.button === 0) lmbDown = false;
+  if (e.button === 2) rmbDown = false;
+});
+canvas.addEventListener('mousemove', e => {
+  const dxPx = e.clientX - lastMouseX, dyPx = e.clientY - lastMouseY;
+  lastMouseX = e.clientX; lastMouseY = e.clientY;
+  if (mmbDown) { camX -= dxPx / tilePx; camY -= dyPx / tilePx; return; }
+  const [tx, ty] = screenToTile(e.clientX, e.clientY);
+  if (lmbDown && (tx !== lastDragX || ty !== lastDragY)) {
+    const blk = meta && meta.blocks[selBlock];
+    if (blk && (blk.role === 3 || blk.role === 10)) {
+      const dx = tx - lastDragX, dy = ty - lastDragY;
+      buildRot = Math.abs(dx) >= Math.abs(dy) ? (dx >= 0 ? 0 : 2) : (dy < 0 ? 1 : 3);
+      const rh = document.getElementById('rotHint');
+      if (rh) rh.textContent = `[R] Поворот: ${ROT_ARROWS[buildRot]}  |  ЛКМ: строить  ПКМ: снести  WASD/Колесо: камера`;
+    }
+    lastDragX = tx; lastDragY = ty;
+    sendCmd({ cmd: 'place', x: tx, y: ty, block: selBlock, rot: buildRot });
+  } else if (rmbDown) {
+    sendCmd({ cmd: 'remove', x: tx, y: ty });
+  }
+});
+
+mmCanvas.addEventListener('mousedown', e => {
+  if (!mapData) return;
+  const r = mmCanvas.getBoundingClientRect();
+  camX = ((e.clientX - r.left) / r.width) * mapData.w;
+  camY = ((e.clientY - r.top) / r.height) * mapData.h;
+});
+
+window.addEventListener('keydown', e => {
+  if (e.target.tagName === 'INPUT') return;
+  keys[e.code] = true;
+  if (e.code === 'KeyR') {
+    buildRot = (buildRot + 1) & 3;
+    const rh = document.getElementById('rotHint');
+    if (rh) rh.textContent = `[R] Поворот: ${ROT_ARROWS[buildRot]}  |  ЛКМ: строить  ПКМ: снести  WASD/Колесо: камера`;
+  } else if (e.code === 'Space') { e.preventDefault(); sendCmd({ cmd: 'wave' }); }
+  else if (e.code === 'KeyP') sendCmd({ cmd: 'pause', arg: (state && (state.flags & 1)) ? 0 : 1 });
+  else if (e.code === 'KeyB') sendCmd({ cmd: 'sandbox', arg: (state && (state.flags & 2)) ? 0 : 1 });
+  else if (e.code === 'KeyM') { rebuildSectors(); document.getElementById('sectorModal').classList.toggle('open'); }
+  else if (e.code >= 'Digit1' && e.code <= 'Digit7') {
+    curCat = parseInt(e.code.slice(5), 10);
+    const first = meta && meta.blocks.find(x => x.cat === curCat);
+    if (first) selBlock = first.id;
+    rebuildPalette();
+  }
+});
+window.addEventListener('keyup', e => { keys[e.code] = false; });
+
+function updateHud() {
+  if (!state || !meta) return;
+  const resIds = [0, 1, 3, 9, 2, 6, 7, 5];
+  const rb = document.getElementById('resBar');
+  rb.innerHTML = resIds.map(id => {
+    const it = meta.items[id];
+    return `<div class="res-pill"><span class="swatch" style="background:${hexCol(it.color)}"></span><span>${it.ru}</span><span class="res-val">${state.items[id]}</span></div>`;
+  }).join('');
+
+  document.getElementById('btnPause').classList.toggle('active', !!(state.flags & 1));
+  document.getElementById('btnSandbox').classList.toggle('active', !!(state.flags & 2));
+  const espBtn = document.getElementById('btnEsp');
+  espBtn.classList.toggle('esp-on', !!state.esp_connected);
+  espBtn.textContent = state.esp_connected ? `📡 ESP32: ON` : `📡 ESP32-S3`;
+
+  const sec = meta.sectors[state.sector] || meta.sectors[0];
+  const pwrNet = state.pwr_prod - state.pwr_cons;
+  const statusBanner = (state.flags & 8) ? ' 🏆 <span style="color:#78f0a5">СЕКТОР ЗАХВАЧЕН!</span>' :
+                       (state.flags & 4) ? ' 💀 <span style="color:#ff6b6b">ЯДРО УНИЧТОЖЕНО!</span>' : '';
+  document.getElementById('hudStats').innerHTML = `
+    <div><b>Режим:</b> ${state.esp_connected ? ('ESP32-S3 ' + state.esp_label) : 'Локальный ПК (C++17 Q16.16 simcore, 60 TPS)'}${statusBanner}</div>
+    <div><b>Сектор:</b> ${sec.ru} (#${sec.num}) • <b>Волна:</b> ${state.wave}/${state.win_wave} (${Math.floor(state.countdown/60)}с) • <b>Враги:</b> ${state.enemies}</div>
+    <div><b>Энергия:</b> ${pwrNet >= 0 ? '+' : ''}${pwrNet} (${state.pwr_stored}/${state.pwr_cap}) • <b>Тик:</b> ${state.tick} (${state.tick_us} мкс) • <b>Объекты:</b> ${state.buildings.length} зд / ${state.units.length} юн / ${state.projs.length} снар</div>
+  `;
+}
+
+function draw() {
+  if (canvas.width !== window.innerWidth || canvas.height !== window.innerHeight) {
+    canvas.width = window.innerWidth; canvas.height = window.innerHeight;
+  }
+  const pan = 9 / tilePx;
+  if (keys['KeyW'] || keys['ArrowUp']) camY -= pan;
+  if (keys['KeyS'] || keys['ArrowDown']) camY += pan;
+  if (keys['KeyA'] || keys['ArrowLeft']) camX -= pan;
+  if (keys['KeyD'] || keys['ArrowRight']) camX += pan;
+
+  ctx.fillStyle = '#111319';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  if (mapData && state && meta) {
+    const sxOf = wx => (wx - camX) * tilePx + canvas.width * 0.5;
+    const syOf = wy => (wy - camY) * tilePx + canvas.height * 0.5;
+
+    const minX = Math.max(0, Math.floor(camX - canvas.width * 0.5 / tilePx) - 1);
+    const maxX = Math.min(mapData.w - 1, Math.ceil(camX + canvas.width * 0.5 / tilePx) + 1);
+    const minY = Math.max(0, Math.floor(camY - canvas.height * 0.5 / tilePx) - 1);
+    const maxY = Math.min(mapData.h - 1, Math.ceil(camY + canvas.height * 0.5 / tilePx) + 1);
+
+    for (let y = minY; y <= maxY; y++) {
+      const sy = syOf(y);
+      for (let x = minX; x <= maxX; x++) {
+        const sx = sxOf(x);
+        const idx = y * mapData.w + x;
+        ctx.fillStyle = floorCol(mapData.floor[idx], x, y, state.tick);
+        ctx.fillRect(sx, sy, tilePx + 0.6, tilePx + 0.6);
+
+        const ore = mapData.ore[idx];
+        if (ore < meta.items.length) {
+          ctx.fillStyle = hexCol(meta.items[ore].color);
+          const s = tilePx * 0.28;
+          ctx.fillRect(sx + tilePx*0.2, sy + tilePx*0.2, s, s);
+          ctx.fillRect(sx + tilePx*0.52, sy + tilePx*0.48, s, s);
+        }
+        const wl = mapData.wall[idx];
+        if (wl) {
+          ctx.fillStyle = wallCol(wl);
+          ctx.fillRect(sx, sy, tilePx + 0.6, tilePx + 0.6);
+        }
+      }
+    }
+
+    // Спавн врагов
+    ctx.strokeStyle = 'rgba(255,90,90,0.6)';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(sxOf(state.spawn_x + 0.5), syOf(state.spawn_y + 0.5), tilePx * 4.5, 0, Math.PI * 2);
+    ctx.stroke();
+
+    // Здания
+    for (const b of state.buildings) {
+      const def = meta.blocks[b[1]];
+      if (!def) continue;
+      const bx = sxOf(b[2]), by = syOf(b[3]), bw = def.size * tilePx;
+      ctx.fillStyle = '#1d202b';
+      ctx.fillRect(bx + 1, by + 1, bw - 2, bw - 2);
+      ctx.fillStyle = hexCol(def.color);
+      ctx.fillRect(bx + 2.5, by + 2.5, bw - 5, bw - 5);
+
+      if (def.role === 3 || def.role === 10) {
+        const cx = bx + bw * 0.5, cy = by + bw * 0.5, rot = b[5] & 3;
+        ctx.strokeStyle = 'rgba(255,245,200,0.85)';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(cx - DIR_DX[rot]*tilePx*0.2, cy - DIR_DY[rot]*tilePx*0.2);
+        ctx.lineTo(cx + DIR_DX[rot]*tilePx*0.28, cy + DIR_DY[rot]*tilePx*0.28);
+        ctx.stroke();
+        if (def.role === 3 && b[7] > 0 && b[6] < meta.items.length) {
+          const prog = def.param > 0 ? (b[8] / def.param) : 0.5;
+          const sh = (prog - 0.5) * tilePx * 0.72;
+          const isz = tilePx * 0.42;
+          ctx.fillStyle = hexCol(meta.items[b[6]].color);
+          ctx.fillRect(cx + DIR_DX[rot]*sh - isz*0.5, cy + DIR_DY[rot]*sh - isz*0.5, isz, isz);
+        }
+      } else if (def.role >= 21) {
+        const cx = bx + bw * 0.5, cy = by + bw * 0.5;
+        const rad = (b[9] / 1024) * Math.PI * 2;
+        ctx.strokeStyle = '#252834';
+        ctx.lineWidth = Math.max(3, tilePx * 0.2);
+        ctx.beginPath();
+        ctx.moveTo(cx, cy);
+        ctx.lineTo(cx + Math.cos(rad)*bw*0.48, cy + Math.sin(rad)*bw*0.48);
+        ctx.stroke();
+      }
+    }
+
+    // Юниты
+    for (const u of state.units) {
+      const sx = sxOf(u[3]), sy = syOf(u[4]);
+      const rad = (u[5] / 1024) * Math.PI * 2;
+      const r = tilePx * 0.42;
+      ctx.fillStyle = u[2] === 1 ? '#ff5c5c' : '#ffd37f';
+      ctx.beginPath();
+      ctx.moveTo(sx + Math.cos(rad)*r*1.35, sy + Math.sin(rad)*r*1.35);
+      ctx.lineTo(sx + Math.cos(rad+2.35)*r, sy + Math.sin(rad+2.35)*r);
+      ctx.lineTo(sx + Math.cos(rad-2.35)*r, sy + Math.sin(rad-2.35)*r);
+      ctx.closePath();
+      ctx.fill();
+    }
+
+    // Снаряды
+    for (const p of state.projs) {
+      ctx.fillStyle = p[2] === 2 ? '#92ecff' : (p[1] === 0 ? '#ffe07d' : '#ff6b6b');
+      const sz = Math.max(4, tilePx * 0.22);
+      ctx.fillRect(sxOf(p[3]) - sz*0.5, syOf(p[4]) - sz*0.5, sz, sz);
+    }
+
+    // Призрак постройки
+    const [gxT, gyT] = screenToTile(lastMouseX, lastMouseY);
+    const sblk = meta.blocks[selBlock];
+    if (sblk && lastMouseY > 56 && lastMouseY < canvas.height - 96) {
+      const gx = sxOf(gxT), gy = syOf(gyT), gw = sblk.size * tilePx;
+      ctx.strokeStyle = '#90ffab';
+      ctx.lineWidth = 2;
+      ctx.strokeRect(gx, gy, gw, gw);
+      if (sblk.range > 0) {
+        ctx.strokeStyle = 'rgba(255,220,130,0.45)';
+        ctx.beginPath();
+        ctx.arc(gx + gw*0.5, gy + gw*0.5, sblk.range * tilePx, 0, Math.PI*2);
+        ctx.stroke();
+      }
+    }
+
+    // Миникарта
+    if (mmBgImage) {
+      mmCtx.putImageData(mmBgImage, 0, 0);
+      mmCtx.fillStyle = '#ffd37f';
+      for (const b of state.buildings) mmCtx.fillRect(b[2], b[3], 2, 2);
+      mmCtx.fillStyle = '#ff4d4d';
+      for (const u of state.units) mmCtx.fillRect(Math.floor(u[3]), Math.floor(u[4]), 2, 2);
+    }
+  }
+  requestAnimationFrame(draw);
+}
+
+async function init() {
+  const mr = await fetch('/api/meta');
+  meta = await mr.json();
+  rebuildPalette();
+  await loadMap();
+
+  setInterval(async () => {
+    try {
+      const sr = await fetch('/api/state');
+      state = await sr.json();
+      updateHud();
+    } catch (_) {}
+  }, 66);
+
+  requestAnimationFrame(draw);
+}
+init();
+</script>
+</body>
+</html>

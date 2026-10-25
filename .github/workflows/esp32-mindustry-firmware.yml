@@ -1,24 +1,21 @@
-name: Mindustry ESP32-S3 → Firmware
+name: Mindustry Serpulo (PC + ESP32-S3)
 
-# Собирает прошивку прототипа «Серпуло на ESP32-S3» и кладёт готовый .bin
-# в релиз esp32-mindustry-fw-latest (одна постоянная ссылка на скачивание).
-#
-#   https://github.com/homa95120-wq/-/releases/download/esp32-mindustry-fw-latest/mindustry-esp32s3.bin
-#
-# Прошивка = headless-сервер симуляции: считает конвейеры, жидкости,
-# энергосеть, бой и A*, пишет статистику в UART. Это НЕ игра с экраном.
+# Собирает и тестирует обе версии проекта esp32s3-mindustry-serpulo:
+#   1) Прошивку ESP32-S3 (ESP-IDF 5.3.1, target esp32s3) -> mindustry-esp32s3.bin
+#   2) Версию для ПК (Windows x64, Linux x64, macOS):
+#      - mindustry-serpulo-pc (SDL2 + OpenGL 3.3 Core)
+#      - mindustry-serpulo-web (HTTP + HTML5 Canvas Studio)
+#      - headless_runner + автотесты детерминизма simcore (ctest)
 
 on:
   push:
-    branches: [main]
+    branches: [main, 'arena/**']
     paths:
-      - 'esp32s3-mindustry-serpulo/esp-idf/**'
-      - 'esp32s3-mindustry-serpulo/micropython/**'
-      - 'esp32s3-mindustry-serpulo/DOWNLOAD.md'
+      - 'esp32s3-mindustry-serpulo/**'
       - '.github/workflows/esp32-mindustry-firmware.yml'
   pull_request:
     paths:
-      - 'esp32s3-mindustry-serpulo/esp-idf/**'
+      - 'esp32s3-mindustry-serpulo/**'
       - '.github/workflows/esp32-mindustry-firmware.yml'
   workflow_dispatch:
 
@@ -26,11 +23,15 @@ permissions:
   contents: write
 
 jobs:
-  build:
+  build-esp32s3:
+    name: ESP32-S3 Firmware (ESP-IDF 5.3.1)
     runs-on: ubuntu-latest
 
     steps:
       - uses: actions/checkout@v4
+
+      - name: Static zero-float & zero-heap gate (simcore)
+        run: python3 esp32s3-mindustry-serpulo/tools/check_no_float.py
 
       - name: Build firmware (ESP-IDF 5.3.1, target esp32s3)
         uses: espressif/esp-idf-ci-action@v1
@@ -53,7 +54,7 @@ jobs:
         run: |
           LOG=esp32s3-mindustry-serpulo/esp-idf/build-log.txt
           if [ ! -f "$LOG" ]; then
-            echo "::error title=build::build-log.txt not found - the ESP-IDF action failed before the build started (docker pull or action error)"
+            echo "::error title=build::build-log.txt not found"
             exit 0
           fi
           echo "----- tail of build log -----"
@@ -61,51 +62,163 @@ jobs:
           grep -n -E "error:|CMake Error|undefined reference|FAILED:|No such file|not found" "$LOG" | head -8 | while IFS= read -r line; do
             echo "::error title=build::$(printf '%s' "$line" | tr '\n%' '  ' | cut -c1-900)"
           done
-          gh api "repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}/comments" \
-            -f body="$(tail -c 60000 "$LOG")" >/dev/null 2>&1 || true
 
-      - name: Show build results
+      - name: Collect ESP32-S3 firmware files
         run: |
-          ls -la esp32s3-mindustry-serpulo/esp-idf/build/*.bin
-          ls -la esp32s3-mindustry-serpulo/esp-idf/build/*.elf
-
-      - name: Collect release files
-        run: |
-          mkdir -p release
-          cp esp32s3-mindustry-serpulo/esp-idf/build/mindustry-esp32s3.bin release/
-          cp esp32s3-mindustry-serpulo/esp-idf/build/mindserpulo.bin release/mindserpulo-app.bin || true
-          cp esp32s3-mindustry-serpulo/esp-idf/build/flash_args release/flash_args.txt || true
-          cp esp32s3-mindustry-serpulo/micropython/main.py release/main.py
-          if [ -f esp32s3-mindustry-serpulo/DOWNLOAD.md ]; then
-            cp esp32s3-mindustry-serpulo/DOWNLOAD.md release/README.md
+          mkdir -p release-esp
+          cp esp32s3-mindustry-serpulo/esp-idf/build/mindustry-esp32s3.bin release-esp/
+          cp esp32s3-mindustry-serpulo/esp-idf/build/mindustry_serpulo_s3.bin release-esp/ || true
+          cp esp32s3-mindustry-serpulo/esp-idf/build/flash_args release-esp/flash_args.txt || true
+          if [ -f esp32s3-mindustry-serpulo/micropython/main.py ]; then
+            cp esp32s3-mindustry-serpulo/micropython/main.py release-esp/main.py
           fi
-          ls -la release
+          cp esp32s3-mindustry-serpulo/DOWNLOAD.md release-esp/README.md
+          ls -lh release-esp
 
-      - name: Upload artifact
+      - name: Upload ESP32-S3 artifact
         uses: actions/upload-artifact@v4
         with:
           name: mindustry-esp32s3-firmware
-          path: release/*
+          path: release-esp/*
           if-no-files-found: error
 
-      - name: Publish to GitHub Release (main only)
-        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
-        env:
-          GH_TOKEN: ${{ github.token }}
+  build-pc:
+    name: PC Build & CTest (${{ matrix.label }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            label: linux-x64
+            archive: mindustry-serpulo-pc-linux-x64.zip
+          - os: macos-latest
+            label: macos
+            archive: mindustry-serpulo-pc-macos.zip
+          - os: windows-latest
+            label: win64
+            archive: mindustry-serpulo-pc-win64.zip
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Static zero-float & zero-heap gate (simcore)
+        shell: bash
         run: |
-          NOTES="Прошивка прототипа «Mindustry / Серпуло на ESP32-S3».
-          Только что собрана из коммита ${GITHUB_SHA:0:7} (ESP-IDF 5.3.1, target esp32s3).
+          if command -v python >/dev/null 2>&1; then
+            python esp32s3-mindustry-serpulo/tools/check_no_float.py
+          else
+            python3 esp32s3-mindustry-serpulo/tools/check_no_float.py
+          fi
 
-          - \`mindustry-esp32s3.bin\` — объединённый образ, прошивать по адресу 0x0 (16 МБ flash).
-          - \`main.py\` — вариант на MicroPython для ESP32 Studio (Wi-Fi AP + TCP-сервер).
-          - \`README.md\` — как прошить и что это вообще такое.
+      - name: Install SDL2 (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libsdl2-dev
 
-          Это headless-сервер симуляции, а не игра с экраном: плата считает
-          конвейеры, жидкости, энергосеть, бой и A*, результат — в UART-логе."
+      - name: Install SDL2 (macOS)
+        if: runner.os == 'macOS'
+        run: brew install sdl2
+
+      - name: Download SDL2 VC devel (Windows x64)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri "https://github.com/libsdl-org/SDL/releases/download/release-2.30.9/SDL2-devel-2.30.9-VC.zip" -OutFile sdl2.zip
+          Expand-Archive -Path sdl2.zip -DestinationPath sdl2-sdk
+          $sdlDir = (Resolve-Path "sdl2-sdk/SDL2-2.30.9/cmake").Path
+          echo "SDL2_CMAKE_DIR=$sdlDir" >> $env:GITHUB_ENV
+          $sdlDll = (Resolve-Path "sdl2-sdk/SDL2-2.30.9/lib/x64/SDL2.dll").Path
+          echo "SDL2_DLL_PATH=$sdlDll" >> $env:GITHUB_ENV
+
+      - name: Configure & Build PC targets (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          cmake -S esp32s3-mindustry-serpulo -B build-pc -DCMAKE_BUILD_TYPE=Release
+          cmake --build build-pc --config Release -j 4
+          test -x build-pc/mindustry-serpulo-pc
+          test -x build-pc/mindustry-serpulo-web
+          test -x build-pc/headless_runner
+
+      - name: Configure & Build PC targets (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          cmake -S esp32s3-mindustry-serpulo -B build-pc -A x64 "-DSDL2_DIR=$env:SDL2_CMAKE_DIR"
+          cmake --build build-pc --config Release --parallel 4
+          if (!(Test-Path "build-pc/Release/mindustry-serpulo-pc.exe")) { throw "mindustry-serpulo-pc.exe missing" }
+          if (!(Test-Path "build-pc/Release/mindustry-serpulo-web.exe")) { throw "mindustry-serpulo-web.exe missing" }
+          if (!(Test-Path "build-pc/Release/headless_runner.exe")) { throw "headless_runner.exe missing" }
+
+      - name: Run simcore determinism & protocol CTest suite
+        run: ctest --test-dir build-pc -C Release --output-on-failure
+
+      - name: Package PC distribution (${{ matrix.label }})
+        shell: bash
+        run: |
+          mkdir -p dist/web-preview
+          cp esp32s3-mindustry-serpulo/web-preview/index.html dist/web-preview/index.html
+          cp esp32s3-mindustry-serpulo/DOWNLOAD.md dist/README.md
+          cp esp32s3-mindustry-serpulo/LICENSE dist/LICENSE.txt
+          if [ "${RUNNER_OS}" = "Windows" ]; then
+            cp build-pc/Release/mindustry-serpulo-pc.exe dist/
+            cp build-pc/Release/mindustry-serpulo-web.exe dist/
+            cp build-pc/Release/headless_runner.exe dist/
+            cp "${SDL2_DLL_PATH}" dist/SDL2.dll
+          else
+            cp build-pc/mindustry-serpulo-pc dist/
+            cp build-pc/mindustry-serpulo-web dist/
+            cp build-pc/headless_runner dist/
+          fi
+          ls -lh dist
+
+      - name: Upload PC artifact (${{ matrix.label }})
+        uses: actions/upload-artifact@v4
+        with:
+          name: mindustry-serpulo-pc-${{ matrix.label }}
+          path: dist/*
+          if-no-files-found: error
+
+  publish-release:
+    name: Publish GitHub Release (main / manual)
+    needs: [build-esp32s3, build-pc]
+    if: (github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch') && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: all-artifacts
+
+      - name: Collect & upload release assets
+        run: |
+          mkdir -p upload
+          cp all-artifacts/mindustry-esp32s3-firmware/* upload/
+          (cd all-artifacts/mindustry-serpulo-pc-linux-x64 && chmod +x mindustry-serpulo-pc mindustry-serpulo-web headless_runner && zip -r ../../upload/mindustry-serpulo-pc-linux-x64.zip .)
+          (cd all-artifacts/mindustry-serpulo-pc-macos && chmod +x mindustry-serpulo-pc mindustry-serpulo-web headless_runner && zip -r ../../upload/mindustry-serpulo-pc-macos.zip .)
+          (cd all-artifacts/mindustry-serpulo-pc-win64 && zip -r ../../upload/mindustry-serpulo-pc-win64.zip .)
+          ls -lh upload
+
+          NOTES="Единый детерминированный релиз **Mindustry v160.7 (Серпуло)** для **ПК** и **ESP32-S3** (коммит \`${GITHUB_SHA:0:7}\`).
+
+          ### Версия для ПК (SDL2 + OpenGL 3.3 Core и HTTP/Canvas Studio)
+          - \`mindustry-serpulo-pc-win64.zip\` — Windows x64 (\`mindustry-serpulo-pc.exe\` + \`SDL2.dll\`, \`mindustry-serpulo-web.exe\`, \`headless_runner.exe\`)
+          - \`mindustry-serpulo-pc-linux-x64.zip\` — Linux x64
+          - \`mindustry-serpulo-pc-macos.zip\` — macOS
+
+          ### Прошивка для ESP32-S3 (ESP-IDF 5.3.1, N16R8)
+          - \`mindustry-esp32s3.bin\` — объединённый образ прошивки (адрес \`0x0\`, Wi-Fi AP \`Mindustry-S3\` \`192.168.4.1:26789\` + UART0 \`115200\`)."
+
           gh release view esp32-mindustry-fw-latest >/dev/null 2>&1 || \
             gh release create esp32-mindustry-fw-latest \
               --prerelease \
-              --title "Mindustry / Серпуло для ESP32-S3 — прошивка (прототип)" \
+              --title "Mindustry v160.7 (Серпуло) — Версия для ПК и ESP32-S3" \
               --notes "$NOTES" \
               --target "$GITHUB_SHA"
-          gh release upload esp32-mindustry-fw-latest release/* --clobber
+          gh release edit esp32-mindustry-fw-latest \
+            --title "Mindustry v160.7 (Серпуло) — Версия для ПК и ESP32-S3" \
+            --notes "$NOTES"
+          gh release upload esp32-mindustry-fw-latest upload/* --clobber

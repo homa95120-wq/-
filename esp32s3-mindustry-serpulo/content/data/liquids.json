@@ -1,0 +1,18 @@
+{
+  "source_version": "v160.7",
+  "source_commit": "17012d61d9e4c3cbd9820d87e81c24495486ac53",
+  "source_file": "core/src/mindustry/content/Liquids.java",
+  "liquids": [
+    { "id": 0,  "enum_name": "Water",     "name": "water",     "ru": "Вода",        "color": "0x596AB8", "heat_capacity": "0.4",  "temperature": "0.5",  "viscosity": "0.5",  "flammability": "0",   "gas": false, "coolant": true,  "hidden": false },
+    { "id": 1,  "enum_name": "Slag",      "name": "slag",      "ru": "Шлак",        "color": "0xFFA166", "heat_capacity": "0",    "temperature": "1.0",  "viscosity": "0.7",  "flammability": "0",   "gas": false, "coolant": false, "hidden": false },
+    { "id": 2,  "enum_name": "Oil",       "name": "oil",       "ru": "Нефть",       "color": "0x313131", "heat_capacity": "0.7",  "temperature": "0.5",  "viscosity": "0.75", "flammability": "1.2", "gas": false, "coolant": true,  "hidden": false },
+    { "id": 3,  "enum_name": "Cryofluid", "name": "cryofluid", "ru": "Криоген",     "color": "0x6ECDEC", "heat_capacity": "0.9",  "temperature": "0.25", "viscosity": "0.5",  "flammability": "0",   "gas": false, "coolant": true,  "hidden": false },
+    { "id": 4,  "enum_name": "Neoplasm",  "name": "neoplasm",  "ru": "Неоплазма",   "color": "0xC33E2B", "heat_capacity": "0.4",  "temperature": "0.54", "viscosity": "0.85", "flammability": "0",   "gas": false, "coolant": false, "hidden": false },
+    { "id": 5,  "enum_name": "Arkycite",  "name": "arkycite",  "ru": "Аркицит",     "color": "0x84A94B", "heat_capacity": "0",    "temperature": "0.5",  "viscosity": "0.7",  "flammability": "0.4", "gas": false, "coolant": true,  "hidden": false },
+    { "id": 6,  "enum_name": "Gallium",   "name": "gallium",   "ru": "Галлий",      "color": "0x9A9DBF", "heat_capacity": "0",    "temperature": "0.5",  "viscosity": "0.5",  "flammability": "0",   "gas": false, "coolant": false, "hidden": true  },
+    { "id": 7,  "enum_name": "Ozone",     "name": "ozone",     "ru": "Озон",        "color": "0xFC81DD", "heat_capacity": "0",    "temperature": "0.5",  "viscosity": "0.5",  "flammability": "1.0", "gas": true,  "coolant": false, "hidden": false },
+    { "id": 8,  "enum_name": "Hydrogen",  "name": "hydrogen",  "ru": "Водород",     "color": "0x9EABF7", "heat_capacity": "0",    "temperature": "0.5",  "viscosity": "0.5",  "flammability": "1.0", "gas": true,  "coolant": false, "hidden": false },
+    { "id": 9,  "enum_name": "Nitrogen",  "name": "nitrogen",  "ru": "Азот",        "color": "0xEFE3FF", "heat_capacity": "0",    "temperature": "0.5",  "viscosity": "0.5",  "flammability": "0",   "gas": true,  "coolant": false, "hidden": false },
+    { "id": 10, "enum_name": "Cyanogen",  "name": "cyanogen",  "ru": "Циан",        "color": "0x89E8B6", "heat_capacity": "0",    "temperature": "0.5",  "viscosity": "0.5",  "flammability": "2.0", "gas": true,  "coolant": false, "hidden": false }
+  ]
+}

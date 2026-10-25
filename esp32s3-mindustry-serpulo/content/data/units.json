@@ -1,0 +1,15 @@
+{
+  "source_version": "v160.7",
+  "source_commit": "17012d61d9e4c3cbd9820d87e81c24495486ac53",
+  "source_file": "core/src/mindustry/content/UnitTypes.java",
+  "units": [
+    { "id": 0, "enum_name": "Dagger",   "name": "dagger",   "ru": "Кинжал",   "color": "0xFFA665", "hp": 150,  "armor": 0, "speed_tiles_tick": "0.0625", "range_tiles": "14.0", "reload_ticks": 13, "damage": 9,  "flying": false, "suicide": false },
+    { "id": 1, "enum_name": "Crawler",  "name": "crawler",  "ru": "Ползун",   "color": "0xC77DFF", "hp": 150,  "armor": 0, "speed_tiles_tick": "0.125",  "range_tiles": "2.0",  "reload_ticks": 24, "damage": 65, "flying": false, "suicide": true  },
+    { "id": 2, "enum_name": "Flare",    "name": "flare",    "ru": "Вспышка",  "color": "0xFFCE73", "hp": 70,   "armor": 0, "speed_tiles_tick": "0.22",   "range_tiles": "12.0", "reload_ticks": 20, "damage": 9,  "flying": true,  "suicide": false },
+    { "id": 3, "enum_name": "Mace",     "name": "mace",     "ru": "Булава",   "color": "0xFF7F50", "hp": 550,  "armor": 4, "speed_tiles_tick": "0.0625", "range_tiles": "8.5",  "reload_ticks": 22, "damage": 28, "flying": false, "suicide": false },
+    { "id": 4, "enum_name": "Pulsar",   "name": "pulsar",   "ru": "Пульсар",  "color": "0x84F491", "hp": 320,  "armor": 4, "speed_tiles_tick": "0.0875", "range_tiles": "10.0", "reload_ticks": 26, "damage": 16, "flying": false, "suicide": false },
+    { "id": 5, "enum_name": "Horizon",  "name": "horizon",  "ru": "Горизонт", "color": "0xFFB366", "hp": 340,  "armor": 3, "speed_tiles_tick": "0.16",   "range_tiles": "11.0", "reload_ticks": 45, "damage": 42, "flying": true,  "suicide": false },
+    { "id": 6, "enum_name": "Fortress", "name": "fortress", "ru": "Крепость", "color": "0xFF5C5C", "hp": 900,  "armor": 9, "speed_tiles_tick": "0.053",  "range_tiles": "20.0", "reload_ticks": 55, "damage": 68, "flying": false, "suicide": false },
+    { "id": 7, "enum_name": "Spiroct",  "name": "spiroct",  "ru": "Спирокт",  "color": "0x9D6BFF", "hp": 1000, "armor": 9, "speed_tiles_tick": "0.0675", "range_tiles": "13.0", "reload_ticks": 25, "damage": 34, "flying": false, "suicide": false }
+  ]
+}

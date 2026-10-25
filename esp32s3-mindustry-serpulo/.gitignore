@@ -1,21 +1,31 @@
-# ESP-IDF
+# Host CMake & ESP-IDF build directories
 build/
-sdkconfig
-sdkconfig.old
-sdkconfig.defaults.bak
-.flasher_args.json
+build-*/
+cmake-build-*/
+esp-idf/build/
+esp-idf/sdkconfig
+esp-idf/sdkconfig.old
+esp-idf/sdkconfig.defaults.bak
+esp-idf/.flasher_args.json
+esp-idf/dependencies.lock
+esp-idf/managed_components/
+
+# Compiled binaries & saves
+*.o
+*.obj
+*.a
+*.lib
+*.exe
+*.msv1
+build-log.txt
 
 # Python
 __pycache__/
 *.pyc
 
-# OS
+# OS & IDEs
 .DS_Store
 Thumbs.db
-
-# IDE
 .idea/
 .vscode/
 *.iml
-# CI build log
-build-log.txt

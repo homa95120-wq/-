@@ -240,7 +240,7 @@ def gen_blocks() -> None:
     blocks = doc["blocks"]
     roles = [
         "CORE", "STORAGE", "DRILL", "CONVEYOR", "JUNCTION", "ROUTER", "SORTER",
-        "OVERFLOW", "BRIDGE", "PUMP", "PIPE", "LIQ_ROUT",
+        "OVERFLOW_GATE", "BRIDGE", "PUMP", "PIPE", "LIQ_ROUT",
         "GEN_FUEL", "GEN_STEAM", "GEN_THERM", "GEN_SOLAR", "PWR_NODE", "BATTERY",
         "CRAFTER", "WALL", "MENDER",
         "TURRET_ITEM", "TURRET_AIR", "TURRET_ARTY", "TURRET_PWR",

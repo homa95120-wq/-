@@ -122,7 +122,7 @@ bool try_accept_item(SimWorld& w, uint16_t dst_slot, uint8_t item_id, uint8_t fr
         case BlockRole::JUNCTION:
         case BlockRole::ROUTER:
         case BlockRole::SORTER:
-        case BlockRole::OVERFLOW:
+        case BlockRole::OVERFLOW_GATE:
         case BlockRole::BRIDGE:
             if (dst.item_count < 4u && (dst.item_count == 0u || dst.item_id == item_id)) {
                 dst.item_id = item_id;
@@ -1137,7 +1137,7 @@ void sim_step_tick(SimWorld& w) noexcept {
                 break;
             }
 
-            case BlockRole::OVERFLOW: {
+            case BlockRole::OVERFLOW_GATE: {
                 if (b.item_count == 0u) break;
                 const uint8_t in_dir = static_cast<uint8_t>(b.aux_item_id & 3u);
                 const uint8_t try_dirs[3] = {

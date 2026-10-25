@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #define SDL_MAIN_HANDLED
+#if __has_include(<SDL2/SDL.h>)
+#include <SDL2/SDL.h>
+#else
 #include <SDL.h>
+#endif
 
 #include <algorithm>
 #include <inttypes.h>

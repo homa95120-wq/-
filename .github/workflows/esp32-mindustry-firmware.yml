@@ -127,29 +127,48 @@ jobs:
         run: |
           Invoke-WebRequest -Uri "https://github.com/libsdl-org/SDL/releases/download/release-2.30.9/SDL2-devel-2.30.9-VC.zip" -OutFile sdl2.zip
           Expand-Archive -Path sdl2.zip -DestinationPath sdl2-sdk
-          $sdlDir = (Resolve-Path "sdl2-sdk/SDL2-2.30.9/cmake").Path
+          $sdlDir = ((Resolve-Path "sdl2-sdk/SDL2-2.30.9/cmake").Path -replace '\\','/')
           echo "SDL2_CMAKE_DIR=$sdlDir" >> $env:GITHUB_ENV
-          $sdlDll = (Resolve-Path "sdl2-sdk/SDL2-2.30.9/lib/x64/SDL2.dll").Path
+          $sdlDll = ((Resolve-Path "sdl2-sdk/SDL2-2.30.9/lib/x64/SDL2.dll").Path -replace '\\','/')
           echo "SDL2_DLL_PATH=$sdlDll" >> $env:GITHUB_ENV
 
       - name: Configure & Build PC targets (Unix)
         if: runner.os != 'Windows'
         run: |
-          cmake -S esp32s3-mindustry-serpulo -B build-pc -DCMAKE_BUILD_TYPE=Release
-          cmake --build build-pc --config Release -j 4
-          test -x build-pc/mindustry-serpulo-pc
-          test -x build-pc/mindustry-serpulo-web
-          test -x build-pc/headless_runner
+          set -o pipefail
+          EXTRA_ARGS=""
+          if [ "${RUNNER_OS}" = "macOS" ]; then
+            EXTRA_ARGS="-DCMAKE_PREFIX_PATH=$(brew --prefix)"
+          fi
+          { cmake -S esp32s3-mindustry-serpulo -B build-pc -DCMAKE_BUILD_TYPE=Release ${EXTRA_ARGS} &&
+            cmake --build build-pc --config Release -j 4 &&
+            test -x build-pc/mindustry-serpulo-pc &&
+            test -x build-pc/mindustry-serpulo-web &&
+            test -x build-pc/headless_runner; } 2>&1 | tee build-pc.log
 
       - name: Configure & Build PC targets (Windows)
         if: runner.os == 'Windows'
-        shell: pwsh
+        shell: bash
         run: |
-          cmake -S esp32s3-mindustry-serpulo -B build-pc -A x64 "-DSDL2_DIR=$env:SDL2_CMAKE_DIR"
-          cmake --build build-pc --config Release --parallel 4
-          if (!(Test-Path "build-pc/Release/mindustry-serpulo-pc.exe")) { throw "mindustry-serpulo-pc.exe missing" }
-          if (!(Test-Path "build-pc/Release/mindustry-serpulo-web.exe")) { throw "mindustry-serpulo-web.exe missing" }
-          if (!(Test-Path "build-pc/Release/headless_runner.exe")) { throw "headless_runner.exe missing" }
+          set -o pipefail
+          { cmake -S esp32s3-mindustry-serpulo -B build-pc -A x64 \
+              -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+              "-DSDL2_DIR=${SDL2_CMAKE_DIR}" &&
+            cmake --build build-pc --config Release --parallel 4 &&
+            test -f build-pc/Release/mindustry-serpulo-pc.exe &&
+            test -f build-pc/Release/mindustry-serpulo-web.exe &&
+            test -f build-pc/Release/headless_runner.exe; } 2>&1 | tee build-pc.log
+
+      - name: Report PC build log on failure
+        if: failure()
+        shell: bash
+        run: |
+          if [ -f build-pc.log ]; then
+            tail -60 build-pc.log || true
+            grep -n -iE "error|fatal|undefined|cannot|missing|failed" build-pc.log | head -12 | while IFS= read -r line; do
+              echo "::error title=pc-build-${RUNNER_OS}::$(printf '%s' "$line" | tr '\r\n%' '   ' | cut -c1-800)"
+            done
+          fi
 
       - name: Run simcore determinism & protocol CTest suite
         run: ctest --test-dir build-pc -C Release --output-on-failure

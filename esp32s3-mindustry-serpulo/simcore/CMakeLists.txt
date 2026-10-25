@@ -28,8 +28,7 @@ else()
     )
 
     if(MSVC)
-        target_compile_options(simcore PRIVATE /W4 /EHs-c- /GR-)
-        target_compile_definitions(simcore PRIVATE _HAS_EXCEPTIONS=0)
+        target_compile_options(simcore PRIVATE /W3 /GR-)
     else()
         target_compile_options(simcore PRIVATE
             -fno-exceptions

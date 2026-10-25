@@ -4,7 +4,11 @@
 // Кроссплатформенный загрузчик функций OpenGL 3.3 Core через SDL_GL_GetProcAddress
 // (не требует внешних GLEW/GLAD на Windows, Linux и macOS).
 
+#if __has_include(<SDL2/SDL.h>)
+#include <SDL2/SDL.h>
+#else
 #include <SDL.h>
+#endif
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>

@@ -49,7 +49,10 @@ if(MIND_BUILD_CLIENT_PC)
     find_package(SDL2 QUIET)
     if(TARGET SDL2::SDL2)
         add_executable(mindustry-serpulo-pc "client-pc/src/main_pc.cpp")
-        target_include_directories(mindustry-serpulo-pc PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/client-pc/include")
+        target_include_directories(mindustry-serpulo-pc PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/client-pc/include"
+            ${SDL2_INCLUDE_DIRS}
+        )
         target_link_libraries(mindustry-serpulo-pc PRIVATE mind_net_client simcore SDL2::SDL2 Threads::Threads)
         set_target_properties(mindustry-serpulo-pc PROPERTIES CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
         if(UNIX AND NOT APPLE)

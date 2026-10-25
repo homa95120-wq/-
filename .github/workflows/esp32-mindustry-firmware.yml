@@ -214,11 +214,20 @@ jobs:
 
       - name: Collect & upload release assets
         run: |
+          find all-artifacts -maxdepth 3
           mkdir -p upload
-          cp all-artifacts/mindustry-esp32s3-firmware/* upload/
-          (cd all-artifacts/mindustry-serpulo-pc-linux-x64 && chmod +x mindustry-serpulo-pc mindustry-serpulo-web headless_runner && zip -r ../../upload/mindustry-serpulo-pc-linux-x64.zip .)
-          (cd all-artifacts/mindustry-serpulo-pc-macos && chmod +x mindustry-serpulo-pc mindustry-serpulo-web headless_runner && zip -r ../../upload/mindustry-serpulo-pc-macos.zip .)
-          (cd all-artifacts/mindustry-serpulo-pc-win64 && zip -r ../../upload/mindustry-serpulo-pc-win64.zip .)
+          ESP_DIR="all-artifacts/mindustry-esp32s3-firmware"
+          [ -d "$ESP_DIR/release-esp" ] && ESP_DIR="$ESP_DIR/release-esp"
+          cp "$ESP_DIR"/* upload/
+
+          for item in "linux-x64:mindustry-serpulo-pc-linux-x64.zip" "macos:mindustry-serpulo-pc-macos.zip" "win64:mindustry-serpulo-pc-win64.zip"; do
+            lbl="${item%%:*}"
+            zname="${item##*:}"
+            SRC="all-artifacts/mindustry-serpulo-pc-${lbl}"
+            [ -d "$SRC/dist" ] && SRC="$SRC/dist"
+            chmod +x "$SRC"/mindustry-serpulo-pc "$SRC"/mindustry-serpulo-web "$SRC"/headless_runner 2>/dev/null || true
+            (cd "$SRC" && zip -r "$GITHUB_WORKSPACE/upload/${zname}" .)
+          done
           ls -lh upload
 
           NOTES="Единый детерминированный релиз **Mindustry v160.7 (Серпуло)** для **ПК** и **ESP32-S3** (коммит \`${GITHUB_SHA:0:7}\`).
@@ -231,13 +240,13 @@ jobs:
           ### Прошивка для ESP32-S3 (ESP-IDF 5.3.1, N16R8)
           - \`mindustry-esp32s3.bin\` — объединённый образ прошивки (адрес \`0x0\`, Wi-Fi AP \`Mindustry-S3\` \`192.168.4.1:26789\` + UART0 \`115200\`)."
 
-          gh release view esp32-mindustry-fw-latest >/dev/null 2>&1 || \
-            gh release create esp32-mindustry-fw-latest \
+          gh release view esp32-mindustry-fw-latest -R "${GITHUB_REPOSITORY}" >/dev/null 2>&1 || \
+            gh release create esp32-mindustry-fw-latest -R "${GITHUB_REPOSITORY}" \
               --prerelease \
               --title "Mindustry v160.7 (Серпуло) — Версия для ПК и ESP32-S3" \
               --notes "$NOTES" \
               --target "$GITHUB_SHA"
-          gh release edit esp32-mindustry-fw-latest \
+          gh release edit esp32-mindustry-fw-latest -R "${GITHUB_REPOSITORY}" \
             --title "Mindustry v160.7 (Серпуло) — Версия для ПК и ESP32-S3" \
             --notes "$NOTES"
-          gh release upload esp32-mindustry-fw-latest upload/* --clobber
+          gh release upload esp32-mindustry-fw-latest upload/* -R "${GITHUB_REPOSITORY}" --clobber

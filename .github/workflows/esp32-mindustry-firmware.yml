@@ -200,9 +200,9 @@ jobs:
           if-no-files-found: error
 
   publish-release:
-    name: Publish GitHub Release (main / manual)
+    name: Publish GitHub Release
     needs: [build-esp32s3, build-pc]
-    if: (github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch') && github.event_name != 'pull_request'
+    if: (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/arena/') || github.event_name == 'workflow_dispatch') && github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     env:
       GH_TOKEN: ${{ github.token }}

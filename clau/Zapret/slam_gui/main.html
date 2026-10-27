@@ -1,0 +1,429 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>RUS SLAM — основной экран робота</title>
+  <meta name="theme-color" content="#000000" />
+  <link rel="stylesheet" href="main.css" />
+  <link rel="stylesheet" href="steering.css" />
+  <link rel="stylesheet" href="update.css" />
+  <link rel="stylesheet" href="power.css" />
+  <link rel="stylesheet" href="lidar_settings.css" />
+  <link rel="stylesheet" href="summary.css" />
+  <link rel="stylesheet" href="steer_dial.css" />
+</head>
+<!--
+  Основной экран робота (киоск). Только отображение состояния: управления здесь нет.
+
+  Данные: GET api/state раз в 300 мс (gui/backend.py). Если сервер не отвечает,
+  экран не выдумывает значения: показывает последние полученные, помечает их
+  «устарели» и выводит тревогу. Без робота показывается «нет данных», демо-значений нет.
+
+  Раскладка: слева меню в стиле инженерного пульта — пункт «Пульт» (наверх экрана),
+  журнал событий, связь с бортом, оператор смены. «Сервис» открывает инженерный
+  пульт (/console). Справа — шапка (маршрут, режим,
+  часы, выход), полоса тревог, ключевые показатели АКБ и тяги, шасси (корпус по
+  центру, оси с колёсами, модули в углах). На узком экране меню становится строкой
+  над экраном, журнал и связь уходят вниз.
+
+  Адреса: на дисплее робота — http://127.0.0.1:8080/ ; с планшета — http://<ip>:8080/ ;
+  инженерный пульт — /console.
+-->
+<body>
+  <div class="app">
+    <aside class="side" aria-label="Меню">
+      <div class="brand">
+        <span class="brandmark" aria-hidden="true">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none">
+            <path d="M4 14h16M7 10h10M9 6h6" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/>
+            <circle cx="7" cy="18" r="2.2" fill="currentColor"/>
+            <circle cx="17" cy="18" r="2.2" fill="currentColor"/>
+          </svg>
+        </span>
+        <div>
+          <b>RUS SLAM</b>
+          <small>НТЦ АО «АВТОВАЗ»</small>
+        </div>
+      </div>
+
+      <nav class="nav" aria-label="Разделы экрана">
+        <a class="active" href="#" aria-current="true">
+          <svg class="ico" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+          <span class="nav-text">Пульт</span>
+        </a>
+        <a href="#summary" id="nav-summary">
+          <svg class="ico" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></svg>
+          <span class="nav-text">Сводка</span>
+        </a>
+        <a href="/connections" id="nav-connections"><span class="nav-text">Подключения</span></a>
+        <a href="/battery" id="nav-battery"><span class="nav-text">АКБ</span></a>
+        <a href="/controls" id="nav-controls"><span class="nav-text">Руление и тяга</span></a>
+        <a href="/map" id="nav-map"><span class="nav-text">Карта лидара</span></a>
+        <a id="console-link" href="/console">
+          <svg class="ico" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="3" y="4" width="18" height="14" rx="2"/><path d="M7 9h4M7 13h7M15 9h2"/><path d="M8 21h8"/></svg>
+          <span class="nav-text">Сервис</span>
+        </a>
+      </nav>
+      <button id="side-themes-toggle" class="side-themes-toggle" type="button" aria-expanded="false" aria-controls="side-themes">Темы</button>
+      <div id="side-themes" class="side-themes" role="list" aria-label="Темы" hidden></div>
+
+      <section class="panel events" id="events" aria-labelledby="ev-title">
+        <header class="panel-head">
+          <h2 id="ev-title">Журнал</h2>
+          <span class="panel-meta">за сеанс экрана</span>
+        </header>
+        <ul class="ev-list" id="ev-list" aria-live="polite"></ul>
+      </section>
+
+      <div class="side-status" id="link-card">
+        <div class="side-status-title"><span class="pulse" aria-hidden="true"></span><span>Связь с бортом</span></div>
+        <small><b class="link-state" id="link-state">—</b> · <span id="link-meta">нет данных</span></small>
+      </div>
+
+      <div class="profile">
+        <div class="avatar" aria-hidden="true">РС</div>
+        <div>
+          <b>Оператор смены</b>
+          <small>робот-курьер 4WIS/4WID</small>
+        </div>
+      </div>
+    </aside>
+
+    <main class="main">
+      <header class="top">
+        <div class="top-title">
+          <h1>Пульт</h1>
+          <p class="route-line" id="route"><span>маршрут:</span> <b id="route-from">—</b><span class="route-arrow" aria-hidden="true">→</span><b id="route-to">—</b></p>
+        </div>
+        <div class="top-status">
+          <div class="mode" id="mode" role="status">—</div>
+          <span class="chip" id="data-chip">ожидание сервера</span>
+          <time class="clock" id="clock" aria-label="текущее время">--:--:--</time>
+          <a class="btn btn-ghost" href="/exit" title="Завершить сеанс оператора">Выйти</a>
+        </div>
+      </header>
+
+      <div class="alerts" id="alerts" role="status">
+        <span class="alerts-dot" aria-hidden="true"></span>
+        <span class="alerts-text" id="alerts-text">ожидание данных от робота</span>
+        <span class="alerts-more" id="alerts-more"></span>
+      </div>
+
+      <section class="kpis" id="kpis" aria-label="Ключевые показатели">
+        <article class="kpi kpi-soc">
+          <span class="kpi-label">Заряд АКБ</span>
+          <b class="kpi-value"><span class="kpi-num" id="k-soc">—</span><small>%</small></b>
+          <span class="kpi-sub" id="k-soc-sub">—</span>
+          <div class="meter segs"><i id="k-soc-bar"></i></div>
+        </article>
+        <article class="kpi">
+          <span class="kpi-label">Напряжение</span>
+          <b class="kpi-value"><span class="kpi-num" id="k-volts">—</span><small>В</small></b>
+          <span class="kpi-sub" id="k-volts-sub">—</span>
+        </article>
+        <article class="kpi">
+          <span class="kpi-label">Ток</span>
+          <b class="kpi-value"><span class="kpi-num" id="k-amps">—</span><small>А</small></b>
+          <span class="kpi-sub" id="k-amps-sub">—</span>
+        </article>
+        <article class="kpi">
+          <span class="kpi-label">Запас хода</span>
+          <b class="kpi-value"><span class="kpi-num" id="k-range">—</span><small>км</small></b>
+          <span class="kpi-sub" id="k-range-sub">—</span>
+        </article>
+        <article class="kpi">
+          <span class="kpi-label">Тяга</span>
+          <b class="kpi-value"><span class="kpi-num" id="k-power">—</span><small>кВт</small></b>
+          <span class="kpi-sub" id="k-power-sub">—</span>
+        </article>
+      </section>
+
+      <div class="stage">
+        <section class="panel chassis" id="chassis" aria-labelledby="chassis-title">
+          <header class="panel-head">
+            <h2 id="chassis-title">Шасси</h2>
+            <span class="panel-meta" id="chassis-meta">—</span>
+          </header>
+
+          <div class="chassis-grid">
+            <!-- передняя ось -->
+            <article class="mod tag-fl" id="mod-FL" data-tone="idle">
+              <header class="mod-head">
+                <b class="mod-id">FL</b>
+                <span class="mod-title">передний левый</span>
+                <span class="chip idle" id="mod-state-FL">—</span>
+              </header>
+              <div class="mod-metrics">
+                <div class="metric"><span class="metric-label">угол руля</span><span class="metric-value"><b id="angle-FL">—</b></span></div>
+                <div class="metric"><span class="metric-label">обороты</span><span class="metric-value"><b id="rpm-FL">—</b><small>об/мин</small></span></div>
+                <div class="metric"><span class="metric-label">температура</span><span class="metric-value"><b id="temp-FL">—</b><small>°C</small></span></div>
+              </div>
+              <div class="meter thin"><i id="tbar-FL"></i></div>
+            </article>
+            <div class="axle axle-fl" aria-hidden="true"><div class="wheel" id="wheel-FL" data-tone="idle"><i class="wheel-dir"></i></div></div>
+
+            <div class="body" aria-label="Корпус робота">
+              <span class="body-end body-front">перед</span>
+              <div class="body-speed">
+                <b id="speed">—</b>
+                <small>скорость, м/с</small>
+              </div>
+              <span class="body-end body-rear">корма</span>
+            </div>
+
+            <div class="axle axle-fr" aria-hidden="true"><div class="wheel" id="wheel-FR" data-tone="idle"><i class="wheel-dir"></i></div></div>
+            <article class="mod tag-fr" id="mod-FR" data-tone="idle">
+              <header class="mod-head">
+                <b class="mod-id">FR</b>
+                <span class="mod-title">передний правый</span>
+                <span class="chip idle" id="mod-state-FR">—</span>
+              </header>
+              <div class="mod-metrics">
+                <div class="metric"><span class="metric-label">угол руля</span><span class="metric-value"><b id="angle-FR">—</b></span></div>
+                <div class="metric"><span class="metric-label">обороты</span><span class="metric-value"><b id="rpm-FR">—</b><small>об/мин</small></span></div>
+                <div class="metric"><span class="metric-label">температура</span><span class="metric-value"><b id="temp-FR">—</b><small>°C</small></span></div>
+              </div>
+              <div class="meter thin"><i id="tbar-FR"></i></div>
+            </article>
+
+            <!-- задняя ось -->
+            <article class="mod tag-rl" id="mod-RL" data-tone="idle">
+              <header class="mod-head">
+                <b class="mod-id">RL</b>
+                <span class="mod-title">задний левый</span>
+                <span class="chip idle" id="mod-state-RL">—</span>
+              </header>
+              <div class="mod-metrics">
+                <div class="metric"><span class="metric-label">угол руля</span><span class="metric-value"><b id="angle-RL">—</b></span></div>
+                <div class="metric"><span class="metric-label">обороты</span><span class="metric-value"><b id="rpm-RL">—</b><small>об/мин</small></span></div>
+                <div class="metric"><span class="metric-label">температура</span><span class="metric-value"><b id="temp-RL">—</b><small>°C</small></span></div>
+              </div>
+              <div class="meter thin"><i id="tbar-RL"></i></div>
+            </article>
+            <div class="axle axle-rl" aria-hidden="true"><div class="wheel" id="wheel-RL" data-tone="idle"><i class="wheel-dir"></i></div></div>
+
+            <div class="axle axle-rr" aria-hidden="true"><div class="wheel" id="wheel-RR" data-tone="idle"><i class="wheel-dir"></i></div></div>
+            <article class="mod tag-rr" id="mod-RR" data-tone="idle">
+              <header class="mod-head">
+                <b class="mod-id">RR</b>
+                <span class="mod-title">задний правый</span>
+                <span class="chip idle" id="mod-state-RR">—</span>
+              </header>
+              <div class="mod-metrics">
+                <div class="metric"><span class="metric-label">угол руля</span><span class="metric-value"><b id="angle-RR">—</b></span></div>
+                <div class="metric"><span class="metric-label">обороты</span><span class="metric-value"><b id="rpm-RR">—</b><small>об/мин</small></span></div>
+                <div class="metric"><span class="metric-label">температура</span><span class="metric-value"><b id="temp-RR">—</b><small>°C</small></span></div>
+              </div>
+              <div class="meter thin"><i id="tbar-RR"></i></div>
+            </article>
+          </div>
+        </section>
+
+        <!-- камеры — по ширине шасси ниже шасси: передняя + задняя -->
+        <section class="panel camera" id="camera" aria-labelledby="cam-title">
+          <header class="panel-head">
+            <h2 id="cam-title">Камеры</h2>
+            <span class="panel-meta" id="cam-meta">нет сигнала</span>
+          </header>
+          <div class="cam-grid">
+            <div class="cam-viewport" id="cam-viewport-front">
+              <canvas id="cam-canvas" aria-label="Камера передняя"></canvas>
+              <p class="cam-empty" id="cam-empty" hidden>нет сигнала</p>
+              <span class="cam-badge" aria-hidden="true">● LIVE · ПЕРЕД</span>
+              <span class="cam-cross" aria-hidden="true"></span>
+            </div>
+            <div class="cam-viewport" id="cam-viewport-rear">
+              <canvas id="cam-rear-canvas" aria-label="Камера задняя"></canvas>
+              <p class="cam-empty" id="cam-rear-empty" hidden>нет сигнала</p>
+              <span class="cam-badge" aria-hidden="true">● LIVE · ЗАД</span>
+              <span class="cam-cross" aria-hidden="true"></span>
+            </div>
+          </div>
+          <div class="cam-bar">
+            <span id="cam-res">1920×1080</span>
+            <span>·</span>
+            <span id="cam-fps">30 fps</span>
+            <span class="cam-dot ok" aria-hidden="true"></span>
+          </div>
+        </section>
+
+        <!-- лидар 360°: карта препятствий вокруг робота (данные — поле lidar в /api/state, когда источник его передаёт) -->
+        <section class="panel lidar" id="lidar" aria-labelledby="lidar-title">
+          <header class="panel-head">
+            <h2 id="lidar-title">Лидар 360°</h2>
+            <span class="drive-hint" id="drive-hint" hidden>управление: WASD · пробел — стоп · R — выкл · <b id="drive-cmd">vx 0.00 м/с · wz 0.00 рад/с</b></span>
+            <span class="panel-meta" id="lidar-meta">—</span>
+          </header>
+          <div class="lidar-body">
+            <div class="lidar-map">
+              <canvas id="lidar-canvas" aria-label="Карта лидара"></canvas>
+              <p class="lidar-empty" id="lidar-empty">скана лидара нет</p>
+            </div>
+            <dl class="lidar-stats">
+              <div><dt>точек</dt><dd id="lidar-count">—</dd></div>
+              <div><dt>ближайшее</dt><dd id="lidar-near">—</dd></div>
+              <div><dt>дальность</dt><dd>10 м</dd></div>
+            </dl>
+          </div>
+        </section>
+      </div>
+
+      <!-- Вкладка «Сводка»: рейсы, пробег, энергия, замок — только реальные данные робота.
+           Открывается пунктом меню «Сводка» (#summary); summary.js прячет экран пульта. -->
+      <section class="summary" id="summary" aria-labelledby="sum-title" hidden>
+        <header class="summary-head">
+          <div class="summary-title">
+            <h2 id="sum-title">Сводка работы</h2>
+            <p class="summary-sub">по данным робота · с <span id="sum-since">—</span></p>
+          </div>
+          <div class="summary-actions">
+            <button type="button" class="btn btn-ghost" id="sum-csv">Скачать CSV</button>
+            <button type="button" class="btn btn-ghost" id="sum-json">Скачать JSON</button>
+            <button type="button" class="btn btn-ghost" id="sum-print">Печать отчёта</button>
+            <button type="button" class="btn btn-ghost btn-danger" id="sum-reset">Сбросить сводку</button>
+          </div>
+        </header>
+
+        <p class="summary-state" id="sum-state" role="status">загрузка сводки…</p>
+
+        <div class="summary-live panel">
+          <div class="summary-live-item"><span>Связь с бортом</span><b id="sum-link">—</b></div>
+          <div class="summary-live-item"><span>Текущий рейс</span><b id="sum-trip-now">—</b></div>
+          <div class="summary-live-item"><span>Последний снимок</span><b id="sum-sample">—</b></div>
+        </div>
+
+        <div class="summary-kpis" id="sum-kpis">
+          <article class="sum-kpi"><span>Рейсы</span><b id="k-trips">—</b><small id="k-trips-sub">—</small></article>
+          <article class="sum-kpi"><span>Пробег</span><b id="k-dist">—</b><small>км</small></article>
+          <article class="sum-kpi"><span>Энергия на разряд</span><b id="k-energy">—</b><small>Вт·ч</small></article>
+          <article class="sum-kpi"><span>Расход</span><b id="k-whkm">—</b><small>Вт·ч/км</small></article>
+          <article class="sum-kpi"><span>Время в движении</span><b id="k-moving">—</b><small id="k-avg-sub">—</small></article>
+          <article class="sum-kpi"><span>Макс. скорость</span><b id="k-maxv">—</b><small>м/с</small></article>
+          <article class="sum-kpi"><span>Энергия на заряд</span><b id="k-charged">—</b><small>Вт·ч</small></article>
+          <article class="sum-kpi"><span>Циклы заряда</span><b id="k-cycles">—</b><small>раз</small></article>
+          <article class="sum-kpi"><span>Неисправности модулей</span><b id="k-faults">—</b><small>раз</small></article>
+          <article class="sum-kpi"><span>Замок ячейки</span><b id="k-lock">—</b><small id="k-lock-sub">—</small></article>
+        </div>
+
+        <div class="summary-grid">
+          <section class="panel summary-panel" aria-labelledby="sum-chart-title">
+            <header class="panel-head"><h2 id="sum-chart-title">Энергия по рейсам</h2><span class="panel-meta">последние 20, Вт·ч на разряд</span></header>
+            <canvas id="sum-chart" class="sum-chart" aria-label="Энергия по рейсам"></canvas>
+            <p class="summary-empty" id="sum-chart-empty" hidden>рейсов ещё нет — диаграмма появится после первого движения</p>
+          </section>
+
+          <section class="panel summary-panel summary-wide" aria-labelledby="sum-trips-title">
+            <header class="panel-head"><h2 id="sum-trips-title">Последние рейсы</h2><span class="panel-meta">новые сверху</span></header>
+            <div class="summary-table-wrap">
+              <table class="summary-table">
+                <thead><tr><th>№</th><th>Начало</th><th>Маршрут</th><th>Путь, км</th><th>Вт·ч</th><th>Движение</th><th>Ср., м/с</th><th>Итог</th></tr></thead>
+                <tbody id="sum-trips"></tbody>
+              </table>
+            </div>
+          </section>
+
+          <section class="panel summary-panel" aria-labelledby="sum-access-title">
+            <header class="panel-head"><h2 id="sum-access-title">Доступ к замку</h2><span class="panel-meta" id="sum-audit-meta">аудит</span></header>
+            <ul class="summary-list" id="sum-audit"></ul>
+          </section>
+
+          <section class="panel summary-panel" aria-labelledby="sum-log-title">
+            <header class="panel-head"><h2 id="sum-log-title">Журнал событий</h2><span class="panel-meta" id="sum-log-meta">журнал процесса</span></header>
+            <ul class="summary-list" id="sum-log"></ul>
+          </section>
+
+          <section class="panel summary-panel summary-wide" aria-labelledby="sum-na-title">
+            <header class="panel-head"><h2 id="sum-na-title">Нет источника в телеметрии</h2><span class="panel-meta">не выдумано — не показывается цифрой</span></header>
+            <ul class="summary-list" id="sum-unavailable"></ul>
+          </section>
+        </div>
+      </section>
+
+      <p class="specs">габариты 75×60×30 см · лидар спереди · рулевые NEMA 23 · тяговые BLDC 260 Вт · АКБ LiFePO4 12S3P, 714 Вт·ч</p>
+    </main>
+  </div>
+
+  <script src="/slam_auth.js" type="1dfc156d91cd4c152f6b956f-text/javascript"></script>
+  <script src="/robot_model.js" type="1dfc156d91cd4c152f6b956f-text/javascript"></script><script src="lidar_view.js" type="1dfc156d91cd4c152f6b956f-text/javascript"></script>
+  <script src="main.js" type="1dfc156d91cd4c152f6b956f-text/javascript"></script>
+  <script type="1dfc156d91cd4c152f6b956f-text/javascript">
+    { const st = new URLSearchParams(location.search).get('st');
+      if (st) {
+        document.getElementById('nav-map').href = '/map?st=' + encodeURIComponent(st);
+      }
+    }
+  </script>
+  <script src="summary.js" type="1dfc156d91cd4c152f6b956f-text/javascript"></script>
+  <script type="1dfc156d91cd4c152f6b956f-text/javascript">
+  // темы как на киоске 8090 — чёрно-красный дизайн по умолчанию
+  (function(){
+    const THEMES = [
+      {id:'red', accent:'#c0505a', bg:'#000000', panel:'#101012'},
+      {id:'rus', accent:'#9fe36b', bg:'#070d0a', panel:'#12201a'},
+      {id:'lavender', accent:'#c9b3ff', bg:'#0a0a14', panel:'#181826'},
+      {id:'ocean', accent:'#4fc3f7', bg:'#061018', panel:'#122636'},
+      {id:'sunset', accent:'#ff8c42', bg:'#120a06', panel:'#241a0f'},
+      {id:'crimson', accent:'#ff4d6d', bg:'#120607', panel:'#241214'},
+      {id:'nord', accent:'#88c0d0', bg:'#0b0f14', panel:'#15202e'},
+      {id:'dracula', accent:'#bd93f9', bg:'#0e0e14', panel:'#1e1e2e'},
+      {id:'light', accent:'#0a0a0a', bg:'#f4f4f6', panel:'#ffffff'},
+      {id:'cyber', accent:'#00ffcc', bg:'#050507', panel:'#10181e'},
+      {id:'forest', accent:'#7ddc52', bg:'#0a120a', panel:'#142814'},
+      {id:'amber', accent:'#ffb84d', bg:'#120e06', panel:'#241d0f'},
+      {id:'teal', accent:'#2ec4b6', bg:'#061214', panel:'#0f2a26'},
+      {id:'violet', accent:'#a78bfa', bg:'#0f0a14', panel:'#22182e'},
+      {id:'midnight', accent:'#60a5fa', bg:'#060a14', panel:'#0f1a2e'},
+      {id:'sand', accent:'#e6c07a', bg:'#12120a', panel:'#242414'},
+      {id:'graphite', accent:'#d0d0d4', bg:'#0e0e0e', panel:'#1a1a1a'},
+      {id:'mint', accent:'#6bd39a', bg:'#0a1412', panel:'#142722'},
+      {id:'peach', accent:'#ffb088', bg:'#14100a', panel:'#2a2018'},
+      {id:'ice', accent:'#7dd3e0', bg:'#0a1418', panel:'#14272e'}
+    ];
+    function apply(id){
+      if (id === 'bw') id = 'red';
+      if (!THEMES.some(t=>t.id===id)) id='red';
+      document.body.setAttribute('data-theme', id);
+      try{ localStorage.setItem('kiosk_theme', id); localStorage.setItem('rc_theme', id);}catch(e){}
+      document.querySelectorAll('.side-theme').forEach(b=> b.classList.toggle('is-active', b.dataset.theme===id));
+    }
+    try{ apply(localStorage.getItem('kiosk_theme')||localStorage.getItem('rc_theme')||'red'); }catch(e){ apply('red'); }
+    const cont = document.getElementById('side-themes');
+    const toggle = document.getElementById('side-themes-toggle');
+    if (cont){
+      THEMES.forEach(th=>{
+        const btn = document.createElement('button');
+        btn.type='button';
+        btn.className='side-theme';
+        btn.dataset.theme=th.id;
+        btn.title=th.id;
+        btn.setAttribute('aria-label', th.id);
+        btn.style.setProperty('--preview-accent', th.accent);
+        btn.style.setProperty('--preview-bg', th.bg);
+        btn.style.setProperty('--preview-panel', th.panel);
+        btn.innerHTML='<span class="dot"></span>';
+        if (document.body.getAttribute('data-theme')===th.id) btn.classList.add('is-active');
+        btn.addEventListener('click', ()=>{ apply(th.id); try{ navigator.vibrate&&navigator.vibrate(10);}catch(e){} });
+        cont.appendChild(btn);
+      });
+    }
+    if (toggle && cont){
+      toggle.addEventListener('click', ()=>{
+        const open = toggle.getAttribute('aria-expanded')==='true';
+        toggle.setAttribute('aria-expanded', String(!open));
+        cont.hidden = open;
+        try{ navigator.vibrate&&navigator.vibrate(8);}catch(e){}
+      });
+    }
+    window.RCTheme={apply};
+  })();
+  </script>
+  <script src="pot_mode.js" type="1dfc156d91cd4c152f6b956f-text/javascript"></script>
+  <script src="steer_presets.js" type="1dfc156d91cd4c152f6b956f-text/javascript"></script>
+  <script src="steer_dial.js" type="1dfc156d91cd4c152f6b956f-text/javascript"></script>
+  <script src="steering.js" type="1dfc156d91cd4c152f6b956f-text/javascript"></script>
+  <script src="update.js" type="1dfc156d91cd4c152f6b956f-text/javascript"></script>
+  <script src="power.js" type="1dfc156d91cd4c152f6b956f-text/javascript"></script>
+  <script src="lidar_settings.js" type="1dfc156d91cd4c152f6b956f-text/javascript"></script>
+<foreignObject><script src="/cdn-cgi/scripts/7d0fa10a/cloudflare-static/rocket-loader.min.js" data-cf-settings="1dfc156d91cd4c152f6b956f-|49" defer></script></foreignObject></body>
+</html>

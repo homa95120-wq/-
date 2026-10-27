@@ -1,0 +1,396 @@
+"""Отрисовка карты лидара на экранах: node-прогон slam_gui/main.js и robot.js.
+
+Экранные скрипты написаны под браузер и ничего не экспортируют, поэтому их
+поведение проверяется через ``tests/js/lidar_screen.js``: поднимается минимальный
+DOM, скрипт выполняется как в странице, ``fetch`` отдаёт заготовленный ответ API,
+а результат читается из тех же элементов, которые видит оператор (подпись под
+картой, счётчик точек, плашка «скана нет», число нарисованных точек на канве).
+
+Здесь закреплено то, что ломалось по-настоящему:
+
+* реальный скан обязан доехать до **обоих** экранов и нарисоваться;
+* демо-скан обязан быть подписан как демо, а не как работающий лидар;
+* при отсутствии скана показывается причина и USB-диагностика;
+* отрисовка не должна падать (``renderErrors``) — одна ошибка в чужом блоке
+  раньше обрывала весь ``render()`` и карта лидара просто переставала
+  обновляться, хотя данные приходили исправно.
+"""
+
+from __future__ import annotations
+
+import json
+import shutil
+import subprocess
+from pathlib import Path
+
+import pytest
+
+ROOT = Path(__file__).resolve().parent.parent
+HARNESS = Path(__file__).resolve().parent / "js" / "lidar_screen.js"
+NODE = shutil.which("node")
+
+pytestmark = pytest.mark.skipif(
+    NODE is None, reason="нет node: экранные скрипты проверяются только с ним")
+
+SCREENS = ("main", "robot")
+
+
+# ---------------------------------------------------------------------------
+# Заготовки ответов API (форма /api/state и /api/kiosk_state)
+# ---------------------------------------------------------------------------
+
+
+def scan_points(count: int, radius: float = 1.5) -> list[dict]:
+    step = round(2 * 3.141592653589793 / max(1, count), 4)
+    return [{"a": round(i * step, 4), "r": radius} for i in range(count)]
+
+
+def lidar_status(**overrides) -> dict:
+    """Состояние лидара из robot_control/lidar.py: Status.as_dict()."""
+    status = {
+        "ok": True,
+        "connected": True,
+        "source": "serial:ttyUSB1",
+        "demo": False,
+        "points_count": 360,
+        "age_s": 0.1,
+        "scan_at": 1_800_000_000.0,
+        "nearest_m": 1.5,
+        "configured_port": "/dev/ttyUSB1",
+        "python": "/home/robot/you/.venv/bin/python",
+        "pyserial": "3.5",
+        "detected": {"port": "/dev/ttyUSB1", "protocol": "lds01",
+                     "baud": 230400, "motor": "none"},
+        "reason": "скан идёт: serial:ttyUSB1",
+        "hint": "",
+        "usb_diagnostics": None,
+        "last_error": "",
+        "candidates": ["/dev/ttyUSB1"],
+        "tried": ["/dev/ttyUSB1"],
+    }
+    status.update(overrides)
+    return status
+
+
+def state_payload(points: list[dict], status: dict) -> dict:
+    """Ответ экрана: телеметрия + скан + состояние лидара."""
+    return {
+        "ok": True,
+        "data": {
+            "ts": 0,
+            "linkOk": True,
+            "source": "none",
+            "mode": None,
+            "speedMps": 0.0,
+            "powerKw": 0.08,
+            "steeringControl": {"available": False, "source": "none"},
+            "battery": {"soc": 80, "volts": 40.1, "amps": 2.0, "watts": 80,
+                        "remainingWh": 500, "rangeKm": 22, "state": "разряд",
+                        "level": "НОРМА", "tempC": 26, "cellMin": 3.3, "cellMax": 3.4,
+                        "thresholds": {"lowV": 35.5, "criticalV": 33.5}},
+            "motors": [{"id": name, "title": name, "angle": 0.0, "rpm": 0.0,
+                        "temp": 30.0, "homed": True, "online": True}
+                       for name in ("FL", "FR", "RL", "RR")],
+            "lidar": points,
+            "lidarDemo": bool(status.get("demo")),
+            "lidarStatus": status,
+        },
+    }
+
+
+def real_payload(points_count: int = 360, **status_over) -> dict:
+    return state_payload(scan_points(points_count),
+                         lidar_status(points_count=points_count, **status_over))
+
+
+def ros_payload(points_count: int = 360, **ros_over) -> dict:
+    """Скан идёт из ROS 2: драйвер публикует /scan, USB-порт приложения нет."""
+    ros = {
+        "available": True,
+        "connected": True,
+        "topic": "/scan",
+        "points": points_count,
+        "hz": 9.4,
+        "age_s": 0.05,
+        "publishers": 1,
+        "publisher_names": ["lidar_supervisor"],
+        "supervisor": {"backend": "zapret_lidar", "state": "running",
+                       "driver": "lds01", "driver_package": "hls_lfcd_lds_driver",
+                       "driver_title": "LDS-01/LDS-02 (TurtleBot3 Burger, HLS-LFCD2)",
+                       "port": "/dev/ttyUSB0", "baud": 230400, "points": points_count},
+        "reason": "скан идёт из ROS 2 /scan: 360 точек, 9.4 Гц",
+        "hint": "",
+    }
+    ros.update(ros_over)
+    status = lidar_status(
+        source="ros", points_count=points_count,
+        detected=None, python="/home/robot/you/.venv/bin/python",
+        reason=ros["reason"], hint=ros["hint"],
+    )
+    status["ros"] = ros
+    status["source_mode"] = "ros"
+    return state_payload(scan_points(points_count), status)
+
+
+def empty_payload() -> dict:
+    """Скана нет совсем: ни реального, ни демо."""
+    status = lidar_status(
+        connected=False, demo=False, source="no_signal", points_count=0,
+        age_s=None, scan_at=None, nearest_m=None, detected=None,
+        reason="лидар не ответил ни на одном из 2 портов",
+        hint="проверь кабель и питание лидара",
+        usb_diagnostics={
+            "summary": "USB/serial-порты доступны",
+            "ports": [{"port": "/dev/serial/by-id/usb-CP2102", "device": "/dev/ttyUSB1",
+                       "accessible": True, "excluded": False},
+                      {"port": "/dev/ttyUSB0", "device": "/dev/ttyUSB0",
+                       "accessible": False, "excluded": True}],
+        },
+    )
+    return state_payload([], status)
+
+
+# ---------------------------------------------------------------------------
+# Прогон экранного скрипта
+# ---------------------------------------------------------------------------
+
+
+def render(screen: str, payload: dict, tmp_path: Path) -> dict:
+    """Прогоняет ``slam_gui/<screen>.js`` на заготовленном ответе API.
+
+    """
+    assert screen in SCREENS
+    payload_file = tmp_path / ("payload_%s.json" % screen)
+    payload_file.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    result = subprocess.run(
+        [NODE, str(HARNESS), screen, str(payload_file)],
+        cwd=str(ROOT), capture_output=True, text=True, timeout=120,
+    )
+    assert result.returncode == 0, \
+        "экран %s упал:\n%s\n%s" % (screen, result.stdout, result.stderr)
+    report = json.loads(result.stdout)
+    report["_stderr"] = result.stderr
+    return report
+
+
+# ---------------------------------------------------------------------------
+# Реальный скан
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("screen", SCREENS)
+def test_real_scan_is_drawn(screen, tmp_path):
+    """Реальные точки доехали до экрана и нарисованы на карте."""
+    report = render(screen, real_payload(), tmp_path)
+    assert report["dots"] > 0, report
+    assert report["count"] == "360"
+    assert report["emptyHidden"] is True, "плашка «нет скана» висит над живыми данными"
+    assert report["renderErrors"] == [], report["renderErrors"]
+
+
+def test_kiosk_map_does_not_clamp_far_points_to_outer_ring(tmp_path):
+    """Точки за 10 м не должны собираться в искусственную окружность."""
+    points = [{"a": 0.0, "r": 12.0}, {"a": 1.57, "r": 2.0}]
+    payload = state_payload(points, lidar_status(points_count=2, nearest_m=2.0))
+    report = render("robot", payload, tmp_path)
+    assert report["count"] == "2"  # полный скан остаётся виден в счётчике
+    assert report["dots"] == 1     # на карту попала только точка в пределах 10 м
+    assert "на карте: 1/2" in report["meta"]
+
+
+@pytest.mark.parametrize("screen", SCREENS)
+def test_scan_from_ros_is_drawn_and_signed_as_ros(screen, tmp_path):
+    """Скан из ROS 2 рисуется, а подпись говорит «ROS 2», топик и драйвер.
+
+    Раньше в подписи был только USB-порт, поэтому на роботе (где скан отдаёт
+    драйвер ROS 2) выглядело так, будто лидар читает само приложение, и в
+    диагностике искали не то.
+    """
+    report = render(screen, ros_payload(360), tmp_path)
+    assert report["dots"] > 0, report
+    assert report["count"] == "360"
+    assert report["emptyHidden"] is True
+    assert report["renderErrors"] == [], report["renderErrors"]
+    meta = report["meta"]
+    assert "ROS 2" in meta, meta
+    assert "/scan" in meta
+    assert "hls_lfcd_lds_driver" in meta
+    assert "9.4" in meta
+
+
+def test_ros_without_scan_shows_the_driver_reason_on_the_console(tmp_path):
+    """ROS 2 есть, драйвер не отдал скан — на пульте причина и команда запуска.
+
+    Бортовой экран намеренно держит статичную плашку (диагностика живёт в панели
+    «Лидар» и на пульте), поэтому проверяем пульт: там оператор и должен увидеть,
+    что дело не в кабеле, а в незапущенном драйвере ROS 2.
+    """
+    ros = {"available": True, "connected": False, "points": 0, "hz": 0.0, "age_s": None,
+           "publishers": 0, "supervisor": {"backend": "zapret_lidar", "state": "failed",
+                                           "reason": "ни один драйвер не отдал /scan",
+                                           "driver": "lds01", "port": "/dev/ttyUSB0"},
+           "reason": "ROS 2 есть, но /scan никто не публикует — драйвер лидара не запущен",
+           "hint": "запусти драйвер лидара: ./scripts/ros2_lidar.sh"}
+    status = lidar_status(connected=False, source="no_signal", points_count=0, age_s=None,
+                          detected=None, reason=ros["reason"], hint=ros["hint"])
+    status["ros"] = ros
+    status["source_mode"] = "ros"
+    report = render("main", state_payload([], status), tmp_path)
+    assert report["dots"] == 0
+    assert report["emptyHidden"] is False
+    text = (report.get("emptyText") or "") + " " + (report.get("title") or "")
+    assert "ros2_lidar.sh" in text, report
+    assert "ROS 2" in text, report
+
+
+@pytest.mark.parametrize("screen", SCREENS)
+def test_real_scan_signature_shows_port_protocol_and_baud(screen, tmp_path):
+    """Оператор видит, что это именно лидар: порт, протокол, скорость."""
+    report = render(screen, real_payload(), tmp_path)
+    meta = report["meta"]
+    assert "в реальном времени" in meta
+    assert "360 точек" in meta
+    assert "ttyUSB1" in meta
+    assert "lds01" in meta
+    assert "230400" in meta
+    assert "демо" not in meta and "не лидар" not in meta
+
+
+@pytest.mark.parametrize("screen,expected", [
+    ("main", "скан от второго процесса"),
+    ("robot", "скан от пульта"),
+])
+def test_peer_scan_is_marked(screen, expected, tmp_path):
+    """Скан взят у второго процесса робота — это штатно, и так и подписано."""
+    payload = real_payload(source="peer", reason="скан берётся у второго процесса робота")
+    report = render(screen, payload, tmp_path)
+    assert report["dots"] > 0
+    assert report["emptyHidden"] is True
+    assert expected in report["meta"]
+    assert report["renderErrors"] == []
+
+
+def test_stale_scan_is_not_shown_as_live(tmp_path):
+    """Скан протух (лидар отвалился) — экран не врёт про «реальное время»."""
+    payload = real_payload(connected=False, source="no_signal", demo=False,
+                           points_count=0, age_s=12.0, detected=None,
+                           reason="скан устарел: лидар отвалился")
+    # Бортовой (kiosk 8090) — только статичная плашка без причины (диагностика — на вебке 8080)
+    report = render("robot", payload, tmp_path)
+    assert "в реальном времени" not in report["meta"]
+    assert report["emptyHidden"] is False
+    assert report["emptyText"] == "скана лидара нет"
+    # Веб (8080) — показывает причину
+    report_main = render("main", payload, tmp_path)
+    assert "устарел" in report_main["emptyText"]
+
+
+# ---------------------------------------------------------------------------
+# Скана нет
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("screen", SCREENS)
+def test_missing_scan_shows_reason_and_usb_diagnostics(screen, tmp_path):
+    report = render(screen, empty_payload(), tmp_path)
+    assert report["dots"] == 0
+    assert report["count"] == "—"
+    assert report["emptyHidden"] is False
+    text = report["emptyText"]
+    if screen == "robot":
+        # Бортовой (kiosk 8090) — только статичная плашка, без причины и USB-диагностики
+        assert text == "скана лидара нет"
+    else:
+        assert "лидар не ответил" in text
+        # USB-диагностика из API видна оператору: порты, права, исключения
+        assert "/dev/serial/by-id/usb-CP2102" in text and "(доступен)" in text
+        assert "нет доступа — нужна группа dialout" in text      # /dev/ttyUSB0
+        assert "исключён настройками" in text                    # и то и другое сразу
+    assert report["renderErrors"] == []
+
+
+@pytest.mark.parametrize("screen", SCREENS)
+def test_missing_scan_meta_text(screen, tmp_path):
+    report = render(screen, empty_payload(), tmp_path)
+    assert report["meta"] == ("лидар: нет данных" if screen == "main" else "нет скана")
+
+
+# ---------------------------------------------------------------------------
+# Панель «Логи»: настоящий журнал робота, а не выдуманный поток
+# ---------------------------------------------------------------------------
+
+
+def journal_payload(entries: list[dict]) -> dict:
+    """Ответ /api/kiosk_logs: записи настоящего журнала процесса."""
+    levels = {"info": 0, "ok": 0, "warn": 0, "err": 0, "debug": 0}
+    for entry in entries:
+        levels[entry["level"]] = levels.get(entry["level"], 0) + 1
+    return {
+        "ok": True,
+        "data": {
+            "entries": entries,
+            "count": len(entries),
+            "shown": len(entries),
+            "dropped": 3,
+            "limit": 400,
+            "levels": levels,
+            "uptimeSec": 128,
+            "source": "master",
+            "demo": False,
+            "journal": "robot",
+        },
+    }
+
+
+def journal_entry(seq: int, level: str, msg: str, *, source: str = "",
+                  ts: float = 1_800_000_000.0, repeat: int = 1) -> dict:
+    return {"seq": seq, "ts": ts + seq, "time": "12:00:%02d" % seq, "level": level,
+            "source": source, "msg": msg, "repeat": repeat}
+
+
+def test_log_panel_shows_real_journal_lines(tmp_path):
+    """Оператор видит настоящие события робота: лидар, отказ команды, PIN."""
+    payload = real_payload()
+    payload["logs"] = journal_payload([
+        journal_entry(1, "ok", "лидар на связи (serial:ttyUSB1, 360 точек)", source="лидар"),
+        journal_entry(2, "warn", "руление отклонено: угол вне допуска ±32°", source="управление"),
+        journal_entry(3, "warn", "PIN не принят (бортовой экран): неверный PIN",
+                      source="pin", repeat=4),
+    ])
+    report = render("robot", payload, tmp_path)
+    lines = report["logLines"]
+    assert report["renderErrors"] == [], report["renderErrors"]
+    assert [line["msg"].split("  ×")[0] for line in lines] == [
+        "руление отклонено: угол вне допуска ±32°",
+        "лидар на связи (serial:ttyUSB1, 360 точек)",
+        "PIN не принят (бортовой экран): неверный PIN",
+    ]
+    assert [line["level"] for line in lines] == ["warn", "ok", "warn"]
+    assert lines[1]["time"] == "12:00:01"
+    # повторяющееся событие подписано счётчиком, а не размножено строками
+    assert lines[2]["msg"].endswith("×4")
+    # подпись под журналом — про настоящий журнал, с числом записей и ошибок
+    status = report["logStatus"]
+    assert "журнал робота" in status and "3 записи" in status
+    assert "вытеснено 3" in status and "источник: master" in status
+
+
+def test_log_panel_does_not_invent_lines(tmp_path):
+    """Журнал пуст — панель молчит о событиях, а не рисует демо-поток."""
+    report = render("robot", real_payload(), tmp_path)
+    assert report["logLines"] == [], report["logLines"]
+    assert "журнал робота" in report["logStatus"]
+    assert "демо" not in report["logStatus"]
+    assert report["renderErrors"] == []
+
+
+def test_screen_survives_payload_without_lidar(tmp_path):
+    """В ответе вообще нет ключа lidar: экран жив, карта пустая, цикл не встал."""
+    payload = real_payload()
+    del payload["data"]["lidar"]
+    del payload["data"]["lidarStatus"]
+    report = render("robot", payload, tmp_path)
+    assert report["dots"] == 0
+    assert report["emptyHidden"] is False
+    assert report["meta"] == "нет скана"
+    assert report["_stderr"] == ""

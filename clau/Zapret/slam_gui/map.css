@@ -1,0 +1,581 @@
+/* Shared map panel; standalone web page is black-red, with a dark/light choice.
+ *
+ * Вся палитра — в переменных --map-*: страница /map и карта внутри бортового
+ * экрана переключаются одной кнопкой «Светлая карта» / «Тёмная карта».
+ * Выбор хранится в localStorage (kiosk_map_theme) и общий для обеих страниц.
+ */
+:root {
+  --map-bg: #050506;
+  --map-bg-2: #0d0b0e;
+  --map-panel: #111013;
+  --map-panel-2: #191519;
+  --map-line: #2a2428;
+  --map-line-2: #3a3035;
+  --map-text: #f5f2f4;
+  --map-muted: #a2949a;
+  /* Акцент мягче прежнего #d71921; красного текста нет: --map-accent-strong
+     (бывшие красные надписи и кнопки) теперь белый. */
+  --map-accent: #c0505a;
+  --map-accent-strong: #f5f2f4;
+  --map-canvas: #08070a;
+  --map-overlay: rgba(8, 7, 10, .82);
+  --map-overlay-border: rgba(255, 255, 255, .14);
+  --map-glow: rgba(192, 80, 90, .35);
+  --map-mono: ui-monospace, monospace;
+}
+:root[data-map-theme="light"] {
+  --map-bg: #f3f1f2;
+  --map-bg-2: #e9e4e6;
+  --map-panel: #ffffff;
+  --map-panel-2: #f7f4f5;
+  --map-line: #e2dcde;
+  --map-line-2: #cfc6c9;
+  --map-text: #141013;
+  --map-muted: #6d6065;
+  --map-accent: #a8434d;
+  --map-accent-strong: #a8434d;
+  --map-canvas: #ffffff;
+  --map-overlay: rgba(255, 255, 255, .88);
+  --map-overlay-border: rgba(20, 10, 14, .16);
+  --map-glow: rgba(168, 67, 77, .28);
+}
+
+.map-page {
+  margin: 0;
+  background: var(--map-bg);
+  color: var(--map-text);
+  font: 14px system-ui, sans-serif;
+  color-scheme: dark;
+}
+:root[data-map-theme="light"] .map-page { color-scheme: light; }
+.map-page * { box-sizing: border-box; }
+.map-page-head { display: flex; align-items: center; flex-wrap: wrap; gap: 16px; padding: 12px 20px; }
+.map-page-head h1 { margin: 0; font-size: 20px; }
+.map-page-head a { color: var(--map-accent-strong); padding: 12px; }
+.map-page-head span { color: var(--map-muted); }
+.map-page main { height: calc(100dvh - 84px); min-height: 400px; padding: 0 16px 16px; }
+/* ======================= КАРТА ЛИДАРА (страница свайпа) ======================= */
+/* Сетка занятости — как в ROS: цвет клеток подбирает map_view.js под тему
+   (тёмная: свободно — почти чёрный, препятствие — красный, «не видели» —
+   тёмно-серый; светлая: белый / чёрный / серый). Робот — треугольник,
+   поверх карты — живой скан лидара. */
+.map-view {
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+}
+.map-stage {
+  height: 100%;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 1fr 340px;
+  gap: 16px;
+  overflow: hidden;
+}
+.map-canvas-wrap {
+  position: relative;
+  background: var(--map-canvas);
+  border: 1px solid var(--map-line);
+  border-radius: 16px;
+  overflow: hidden;
+  min-height: 0;
+}
+.map-canvas-wrap canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  touch-action: none;
+}
+.map-badge {
+  position: absolute;
+  top: 12px;
+  left: 12px;
+  padding: 5px 12px;
+  border-radius: 999px;
+  background: var(--map-overlay);
+  border: 1px solid var(--map-overlay-border);
+  color: var(--map-muted);
+  font: 800 12px/1 var(--map-mono);
+  letter-spacing: 1.2px;
+}
+.map-badge[data-tone="live"] {
+  color: var(--map-accent-strong);
+  border-color: rgba(192, 80, 90, .55);
+  box-shadow: 0 0 12px var(--map-glow);
+}
+.map-legend {
+  position: absolute;
+  right: 12px;
+  bottom: 12px;
+  padding: 4px 10px;
+  border-radius: 8px;
+  background: var(--map-overlay);
+  color: var(--map-muted);
+  font: 600 11px/1.3 var(--map-mono);
+}
+.map-empty {
+  position: absolute;
+  inset: auto 0 50% 0;
+  margin: 0;
+  text-align: center;
+  color: var(--map-muted);
+  font-size: 15px;
+  font-weight: 700;
+}
+.map-side {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px;
+  background: var(--map-panel);
+  border: 1px solid var(--map-line);
+  border-radius: 16px;
+  overflow-y: auto;
+  min-height: 0;
+  color: var(--map-text);
+}
+.map-side-head { display: flex; flex-direction: column; gap: 4px; }
+.map-side-head b { font-size: 16px; font-weight: 900; letter-spacing: .4px; }
+.map-side-head span { color: var(--map-muted); font-size: 12px; font-weight: 700; }
+.map-stats {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin: 0;
+}
+.map-stats > div {
+  padding: 8px 10px;
+  background: var(--map-bg-2);
+  border: 1px solid var(--map-line);
+  border-radius: 10px;
+}
+.map-stats dt {
+  color: var(--map-muted);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: .6px;
+  text-transform: uppercase;
+}
+.map-stats dd {
+  margin: 3px 0 0;
+  font: 700 14px/1.2 var(--map-mono);
+  word-break: break-word;
+}
+.map-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.map-btn {
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--map-line-2);
+  background: var(--map-bg-2);
+  color: var(--map-text);
+  font: 800 13px/1.2 system-ui, sans-serif;
+  cursor: pointer;
+  transition: background .15s, border-color .15s, opacity .15s, color .15s;
+}
+.map-btn:hover { background: var(--map-panel-2); border-color: var(--map-muted); }
+.map-btn:disabled { opacity: .5; cursor: default; }
+.map-btn--theme {
+  grid-column: 1 / -1;
+  border-color: rgba(192, 80, 90, .55);
+  color: var(--map-accent-strong);
+  background: var(--map-bg-2);
+}
+.map-btn--theme:hover { border-color: var(--map-accent-strong); background: var(--map-panel-2); }
+.map-btn--danger { border-color: rgba(192, 80, 90, .5); color: var(--map-accent-strong); }
+.map-btn--danger:hover { background: rgba(192, 80, 90, .12); }
+.map-btn--primary { border-color: rgba(192, 80, 90, .55); color: var(--map-accent-strong); }
+.map-btn.is-on { border-color: var(--map-accent); color: var(--map-accent-strong); }
+.map-file, .map-quality {
+  margin: 0;
+  color: var(--map-muted);
+  font: 600 11px/1.4 var(--map-mono);
+  word-break: break-all;
+}
+.map-settings {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  background: var(--map-bg-2);
+  border: 1px solid var(--map-line);
+  border-radius: 12px;
+}
+.map-field { display: flex; flex-direction: column; gap: 5px; }
+.map-field > span { color: var(--map-muted); font-size: 11px; font-weight: 800; letter-spacing: .4px; }
+.map-field select {
+  padding: 9px 10px;
+  border-radius: 9px;
+  border: 1px solid var(--map-line-2);
+  background: var(--map-panel);
+  color: var(--map-text);
+  font: 600 13px/1.2 system-ui, sans-serif;
+}
+.map-toggle { display: flex; align-items: flex-start; gap: 8px; color: var(--map-text); font-size: 12px; font-weight: 600; }
+.map-toggle input { margin-top: 2px; accent-color: var(--map-accent); }
+.map-settings-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.map-note { color: var(--map-muted); font-size: 11px; font-weight: 600; }
+.map-msg { margin: 0; min-height: 16px; font-size: 12px; font-weight: 700; color: var(--map-muted); }
+.map-msg[data-tone="ok"] { color: var(--map-text); }
+.map-msg[data-tone="warn"] { color: #ffc46b; }
+.map-msg[data-tone="err"] { color: var(--map-accent-strong); }
+:root[data-map-theme="light"] .map-msg[data-tone="warn"] { color: #a15c00; }
+:root[data-map-theme="light"] .map-msg[data-tone="err"] { color: #a8434d; }
+
+/* Навигация: постановка цели на карте, preview пути, supervised start/stop. */
+.nav-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  padding: 12px;
+  border: 1px solid var(--map-line-2);
+  border-radius: 12px;
+  background: var(--map-bg-2);
+}
+.nav-panel-head { display: flex; align-items: center; gap: 8px; }
+.nav-panel-head b { font-size: 14px; font-weight: 900; }
+.nav-status {
+  margin-left: auto;
+  padding: 4px 8px;
+  border: 1px solid var(--map-line-2);
+  border-radius: 999px;
+  color: var(--map-muted);
+  font: 800 10px/1.2 var(--map-mono);
+  text-transform: uppercase;
+}
+.nav-status[data-phase="planned"], .nav-status[data-phase="executing"],
+.nav-status[data-phase="starting"] { color: #85c9ff; border-color: rgba(85, 169, 235, .55); }
+.nav-status[data-phase="succeeded"] { color: #8bd5a6; border-color: rgba(83, 180, 116, .5); }
+.nav-status[data-phase="blocked"], .nav-status[data-phase="error"] { color: var(--map-accent-strong); border-color: rgba(192, 80, 90, .65); }
+.nav-hint, .nav-msg, .nav-route-summary, .nav-safety-note {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--map-muted);
+}
+.nav-goal-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; }
+.nav-coordinate { display: flex; flex-direction: column; gap: 4px; }
+.nav-coordinate span { color: var(--map-muted); font: 800 10px/1.2 var(--map-mono); }
+.nav-coordinate input {
+  width: 100%; min-width: 0; padding: 9px 10px; border-radius: 8px;
+  border: 1px solid var(--map-line-2); background: var(--map-panel);
+  color: var(--map-text); font: 700 13px/1.2 var(--map-mono);
+}
+.nav-coordinate input:focus { outline: 2px solid rgba(85, 169, 235, .45); outline-offset: 1px; }
+.nav-pick { grid-column: 1 / -1; }
+.nav-pick.is-on { border-color: #55a9eb; color: #85c9ff; box-shadow: 0 0 0 2px rgba(85, 169, 235, .16); }
+.nav-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; }
+.nav-start { border-color: rgba(83, 180, 116, .55); color: #8bd5a6; }
+.nav-estop { color: var(--map-text); background: rgba(192, 80, 90, .34); border-color: rgba(192, 80, 90, .9); }
+.nav-estop:hover { background: rgba(192, 80, 90, .55); }
+.nav-actions .map-btn { min-height: 40px; padding: 9px 8px; font-size: 11px; }
+.nav-actions .map-btn:disabled { opacity: .42; }
+.nav-route-summary { color: var(--map-text); font: 700 11px/1.35 var(--map-mono); }
+.nav-msg[data-tone="ok"] { color: #8bd5a6; }
+.nav-msg[data-tone="warn"] { color: #ffc46b; }
+.nav-msg[data-tone="err"] { color: var(--map-accent-strong); }
+.nav-safety-note { padding-top: 7px; border-top: 1px solid var(--map-line); }
+#map-canvas { cursor: crosshair; }
+.nav-selecting #map-canvas { cursor: crosshair; }
+.map-page-head-actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.map-page-head-actions a.map-btn {
+  text-decoration: none;
+  padding: 9px 12px;
+}
+.nav-robot-specs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  padding: 7px 9px;
+  border-radius: 8px;
+  background: var(--map-panel);
+  border: 1px solid var(--map-line);
+  font: 700 11px/1.3 var(--map-mono);
+  color: var(--map-muted);
+}
+.nav-robot-specs b { color: var(--map-text); }
+.map-btn--route {
+  border-color: rgba(39, 193, 232, .65);
+  background: rgba(39, 193, 232, .12);
+  color: #8ce5ff;
+}
+.map-btn--route:hover {
+  border-color: #27c1e8;
+  background: rgba(39, 193, 232, .22);
+}
+:root[data-map-theme="light"] .map-btn--route {
+  color: #055870;
+  border-color: rgba(5, 88, 112, .55);
+  background: rgba(39, 193, 232, .14);
+}
+.nav-open-win { width: 100%; }
+
+/* =================== ОТДЕЛЬНОЕ ОКНО ДВИЖЕНИЯ ПО МАРШРУТУ =================== */
+.route-window {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+}
+.route-window[hidden] { display: none !important; }
+.route-window-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(4, 4, 7, .76);
+  backdrop-filter: blur(5px);
+}
+.route-window-card {
+  position: relative;
+  z-index: 1;
+  width: min(1180px, 96vw);
+  height: min(760px, 90dvh);
+  display: flex;
+  flex-direction: column;
+  background: var(--map-panel);
+  border: 1px solid var(--map-line-2);
+  border-radius: 18px;
+  box-shadow: 0 24px 72px rgba(0, 0, 0, .68), 0 0 0 1px rgba(39, 193, 232, .18);
+  overflow: hidden;
+  color: var(--map-text);
+}
+.route-window--standalone {
+  position: static;
+  padding: 0;
+  height: 100%;
+}
+.route-window--standalone .route-window-card {
+  width: 100%;
+  height: 100%;
+  box-shadow: none;
+}
+.route-standalone-main {
+  height: calc(100dvh - 76px);
+  min-height: 440px;
+  padding: 0 16px 16px;
+}
+.route-win-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 18px;
+  background: var(--map-bg-2);
+  border-bottom: 1px solid var(--map-line);
+}
+.route-win-title-wrap {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.route-win-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #27c1e8;
+  box-shadow: 0 0 10px rgba(39, 193, 232, .85);
+}
+.route-win-title-wrap b {
+  display: block;
+  font-size: 16px;
+  font-weight: 900;
+}
+.route-win-title-wrap small {
+  display: block;
+  color: var(--map-muted);
+  font-size: 11px;
+}
+.route-win-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.route-win-popout {
+  text-decoration: none;
+  font-size: 12px;
+  padding: 7px 11px;
+}
+.route-win-close {
+  width: 34px;
+  height: 34px;
+  border-radius: 9px;
+  border: 1px solid var(--map-line-2);
+  background: var(--map-panel);
+  color: var(--map-text);
+  font-size: 15px;
+  font-weight: 800;
+  cursor: pointer;
+}
+.route-win-close:hover { border-color: var(--map-accent); }
+.route-win-body {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 1fr 330px;
+  gap: 14px;
+  padding: 14px;
+  overflow: hidden;
+}
+.route-win-stage {
+  position: relative;
+  background: #070b10;
+  border: 1px solid var(--map-line-2);
+  border-radius: 14px;
+  overflow: hidden;
+  min-height: 280px;
+}
+.route-win-stage canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  touch-action: none;
+}
+.route-win-hud-top {
+  position: absolute;
+  top: 12px;
+  left: 12px;
+  right: 12px;
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  pointer-events: none;
+}
+.route-hud-pill {
+  padding: 5px 10px;
+  border-radius: 999px;
+  background: rgba(8, 12, 18, .84);
+  border: 1px solid rgba(255, 255, 255, .14);
+  color: #e9f2f7;
+  font: 700 11px/1.2 var(--map-mono);
+}
+.route-hud-pill--lidar {
+  border-color: rgba(39, 193, 232, .55);
+  color: #7ee4ff;
+}
+.route-win-progress-bar {
+  position: absolute;
+  left: 14px;
+  right: 14px;
+  bottom: 12px;
+  height: 7px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, .10);
+  overflow: hidden;
+  pointer-events: none;
+}
+.route-win-progress-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #27c1e8, #53e2a1);
+  transition: width .18s ease-out;
+}
+.route-win-side {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 12px;
+  background: var(--map-bg-2);
+  border: 1px solid var(--map-line);
+  border-radius: 14px;
+  overflow-y: auto;
+  min-height: 0;
+}
+.route-win-kpis {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+.route-kpi {
+  padding: 8px 10px;
+  border-radius: 9px;
+  background: var(--map-panel);
+  border: 1px solid var(--map-line);
+}
+.route-kpi span {
+  display: block;
+  color: var(--map-muted);
+  font: 800 10px/1.2 var(--map-mono);
+  text-transform: uppercase;
+}
+.route-kpi b {
+  display: block;
+  margin-top: 3px;
+  font: 700 12px/1.25 var(--map-mono);
+  color: var(--map-text);
+}
+.route-win-goal-box {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  padding: 10px;
+  border-radius: 10px;
+  background: var(--map-panel);
+  border: 1px solid var(--map-line);
+}
+.route-win-plan-btn { grid-column: 1 / -1; }
+.route-win-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+.route-win-actions #route-win-preview { grid-column: 1 / -1; }
+.route-win-msg {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--map-muted);
+  font-weight: 600;
+}
+.route-win-msg[data-tone="ok"] { color: #8bd5a6; }
+.route-win-msg[data-tone="warn"] { color: #ffc46b; }
+.route-win-msg[data-tone="err"] { color: var(--map-accent-strong); }
+
+@media (max-width: 960px) {
+  .route-win-body {
+    grid-template-columns: 1fr;
+    grid-template-rows: minmax(260px, 1fr) auto;
+    overflow-y: auto;
+  }
+}
+:root[data-map-theme="light"] .nav-status[data-phase="planned"],
+:root[data-map-theme="light"] .nav-status[data-phase="executing"],
+:root[data-map-theme="light"] .nav-status[data-phase="starting"] { color: #075b94; }
+:root[data-map-theme="light"] .nav-status[data-phase="succeeded"],
+:root[data-map-theme="light"] .nav-msg[data-tone="ok"] { color: #216b38; }
+:root[data-map-theme="light"] .nav-msg[data-tone="warn"] { color: #a15c00; }
+:root[data-map-theme="light"] .nav-msg[data-tone="err"] { color: #a8434d; }
+:root[data-map-theme="light"] .nav-start { color: #216b38; }
+
+@media (max-width: 1200px) {
+  .map-stage { grid-template-columns: 1fr; grid-template-rows: minmax(240px, 1fr) auto; overflow: auto; }
+  .map-side { max-height: 48vh; }
+  .map-stats { grid-template-columns: repeat(3, 1fr); }
+}
+@media (max-width: 700px) {
+  .map-stats { grid-template-columns: 1fr 1fr; }
+  .map-actions { grid-template-columns: 1fr; }
+}
+.map-view [hidden] { display: none !important; }
+.map-badge[data-tone="err"] { color: var(--map-text); border-color: #8a5058; }
+
+/* Route editor uses the same panel, controls and theme as the live map. */
+.nav-point-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; max-height: 220px; overflow-y: auto; }
+.nav-point-list:empty::before { content: 'Нет точек · нажмите на свободную область карты'; color: var(--map-muted); font-size: 12px; padding: 10px 0; }
+.nav-point-list li { display: flex; align-items: center; gap: 4px; padding: 6px; background: var(--map-panel-2); border: 1px solid var(--map-line); border-radius: 8px; }
+.nav-point-list li span { flex: 1; font: 12px var(--map-mono); color: var(--map-text); }
+.nav-point-list .map-btn { padding: 6px 9px; min-height: 34px; }
+.nav-point-actions { margin: 8px 0; }
+@media (max-width: 700px) { .nav-point-list .map-btn { min-height: 44px; min-width: 40px; } }
+
+.map-wheel-colors { margin: 0; padding: 12px; display: grid; gap: 10px; border: 1px solid var(--map-line); border-radius: 10px; }
+.map-wheel-colors legend { color: var(--map-text); font-weight: 700; padding: 0 5px; }
+.map-wheel-colors .map-note { margin: 0; line-height: 1.5; }
+.map-wheel-colors input[type="color"] { width: 100%; min-height: 40px; padding: 4px; background: var(--map-panel); border: 1px solid var(--map-line); border-radius: 8px; cursor: pointer; }

@@ -1,0 +1,389 @@
+/* Проверка отрисовки карты лидара в браузере — без браузера.
+ *
+ * Экраны робота (slam_gui/main.js и slam_gui/robot.js) написаны под браузер и
+ * ничего не экспортируют, поэтому здесь поднимается минимальный DOM, скрипт
+ * выполняется как в странице, а результат читается из тех же элементов, которые
+ * видит оператор: подпись под картой (#lidar-meta), счётчик точек
+ * (#lidar-count), плашка «скана лидара нет» (#lidar-empty) и число нарисованных
+ * точек на канве.
+ *
+ * Запуск (из теста tests/test_gui_lidar_render.py или вручную):
+ *   node tests/js/lidar_screen.js <main|robot> <файл-payload.json>
+ * На stdout — JSON: { meta, count, near, emptyHidden, emptyText, dots, title }.
+ */
+'use strict';
+
+const fs = require('fs');
+const path = require('path');
+const vm = require('vm');
+
+const ROOT = path.resolve(__dirname, '..', '..');
+const screen = process.argv[2] || 'robot';
+const payloadFile = process.argv[3];
+if (!payloadFile) {
+  console.error('нужен файл с ответом API');
+  process.exit(2);
+}
+const payload = JSON.parse(fs.readFileSync(payloadFile, 'utf8'));
+
+/* ------------------------------------------------------------------ DOM */
+class ClassList {
+  constructor() { this.set = new Set(); }
+  add(...names) { names.forEach((n) => this.set.add(n)); }
+  remove(...names) { names.forEach((n) => this.set.delete(n)); }
+  contains(name) { return this.set.has(name); }
+  toggle(name, force) {
+    const on = force === undefined ? !this.set.has(name) : !!force;
+    if (on) this.set.add(name); else this.set.delete(name);
+    return on;
+  }
+}
+
+function makeCtx(el) {
+  // Контекст канвы: всё, что рисует точки, запоминаем (по fillRect видно,
+  // сколько точек скана реально попало на карту).
+  const target = {
+    canvas: el,
+    fillRect: (...args) => { el.dots.push(args); },
+    clearRect: () => { el.dots = []; },
+    measureText: () => ({ width: 10 }),
+  };
+  return new Proxy(target, {
+    get(obj, prop) {
+      if (prop in obj) return obj[prop];
+      return () => {};
+    },
+    set(obj, prop, value) { obj[prop] = value; return true; },
+  });
+}
+
+class El {
+  constructor(id, tag) {
+    this.id = id || '';
+    this.tagName = (tag || 'div').toUpperCase();
+    this.textContent = '';
+    this.innerHTML = '';
+    this.hidden = false;
+    this.title = '';
+    this.value = '0';
+    this.checked = false;
+    this.disabled = false;
+    this.style = { setProperty() {}, removeProperty() {}, cssText: '' };
+    this.dataset = {};
+    this.classList = new ClassList();
+    this.children = [];
+    this.parentElement = null;
+    this.clientWidth = 320;
+    this.clientHeight = 320;
+    this.width = 320;
+    this.height = 320;
+    this.dots = [];
+    this.readyState = 'complete';
+    this._innerHTML = '';
+    this.events = {};
+  }
+  /* Панель логов чистит список через `innerHTML = ''` — в браузере это
+   * снимает прежние строки, поэтому и здесь они не должны накапливаться. */
+  get innerHTML() { return this._innerHTML; }
+  set innerHTML(value) {
+    this._innerHTML = value;
+    if (value === '') this.children = [];
+  }
+  addEventListener(name, listener) { (this.events[name] ||= []).push(listener); }
+  removeEventListener() {}
+  appendChild(child) { this.children.push(child); child.parentElement = this; return child; }
+  querySelector() { return null; }
+  querySelectorAll() { return []; }
+  getContext() { if (!this._ctx) this._ctx = makeCtx(this); return this._ctx; }
+  getBoundingClientRect() { return { width: 320, height: 320, top: 0, left: 0 }; }
+  setAttribute() {}
+  getAttribute() { return null; }
+  focus() {}
+  click() { (this.events.click || []).forEach((listener) => listener({ target: this, preventDefault() {} })); }
+  closest() { return null; }
+  play() { return Promise.resolve(); }
+}
+
+const elements = new Map();
+function byId(id) {
+  if (!elements.has(id)) {
+    elements.set(id, new El(id, /canvas/.test(id) ? 'canvas' : 'div'));
+  }
+  return elements.get(id);
+}
+
+const body = new El('body');
+const documentElement = new El('html');
+global.document = {
+  readyState: 'complete',
+  body,
+  documentElement,
+  title: '',
+  getElementById: byId,
+  createElement: (tag) => new El('', tag),
+  createDocumentFragment: () => new El('', 'fragment'),
+  createTextNode: (text) => ({ textContent: text }),
+  /* Свайп-панель камер и логов объявлена на `.kiosk`; без него весь блок
+   * (в том числе панель логов) не выполняется — отдаём ему элемент. */
+  querySelector: (selector) => (selector === '.kiosk' ? byId('kiosk-root') : null),
+  querySelectorAll: () => [],
+  addEventListener: () => {},
+  removeEventListener: () => {},
+  hidden: false,
+};
+
+const rafQueue = [];
+const timeouts = [];
+/* Ошибки отрисовки экраны логируют в console — собираем их, чтобы тест мог
+ * требовать «отрисовка прошла без сбоев»: именно так ловится падение одного
+ * блока, из-за которого карта лидара перестаёт обновляться. */
+const renderErrors = [];
+const otherWarnings = [];
+const RENDER_MARKERS = ['не нарисован', 'сбой отрисовки'];
+const originalWarn = console.warn.bind(console);
+const originalError = console.error.bind(console);
+console.warn = (...args) => {
+  const line = args.map((a) => String(a)).join(' ');
+  if (RENDER_MARKERS.some((m) => line.includes(m))) renderErrors.push(line);
+  else otherWarnings.push(line);
+};
+console.error = (...args) => {
+  renderErrors.push(args.map((a) => String(a)).join(' '));
+};
+global.window = global;
+global.self = global;
+global._kioskBms = payload.bms || null;
+/* Обработчики window (в том числе перетаскивание мышью по свайп-странице)
+ * держим в своём реестре: жест «свайп вправо» должен проверяться по-настоящему,
+ * а не заглушкой. */
+const windowListeners = new Map();
+global.addEventListener = (name, fn) => {
+  if (!windowListeners.has(name)) windowListeners.set(name, []);
+  windowListeners.get(name).push(fn);
+};
+global.removeEventListener = (name, fn) => {
+  const list = windowListeners.get(name) || [];
+  const index = list.indexOf(fn);
+  if (index >= 0) list.splice(index, 1);
+};
+global.dispatchEvent = (event) => {
+  (windowListeners.get(event && event.type) || []).forEach((fn) => {
+    try { fn(event); } catch (err) { /* как в браузере: сбой обработчика не роняет страницу */ }
+  });
+  return true;
+};
+global.location = {
+  search: '',
+  hash: '',
+  href: 'http://127.0.0.1:8090/kiosk',
+  protocol: 'http:',
+};
+global.localStorage = {
+  store: {},
+  getItem(key) { return Object.prototype.hasOwnProperty.call(this.store, key) ? this.store[key] : null; },
+  setItem(key, value) { this.store[key] = String(value); },
+  removeItem(key) { delete this.store[key]; },
+};
+// В Node 22 global.navigator — только для чтения, поэтому определяем свой.
+Object.defineProperty(global, 'navigator', {
+  value: { userAgent: 'node-harness', vibrate: () => true, language: 'ru' },
+  configurable: true,
+  writable: true,
+});
+global.getComputedStyle = () => ({ fontFamily: 'sans-serif', getPropertyValue: () => '' });
+global.requestAnimationFrame = (cb) => { rafQueue.push(cb); return rafQueue.length; };
+global.cancelAnimationFrame = () => {};
+global.matchMedia = () => ({ matches: false, addEventListener() {}, removeEventListener() {} });
+/* Наблюдатель за атрибутами есть в браузере, в Node — нет. Экран следит им за
+ * показом вкладки камер, поэтому без заглушки весь блок падал с
+ * ReferenceError: MutationObserver is not defined. */
+global.MutationObserver = class {
+  constructor(callback) { this.callback = callback; this.targets = []; }
+  observe(target, options) { this.targets.push({ target, options }); }
+  disconnect() { this.targets = []; }
+  takeRecords() { return []; }
+};
+global.URLSearchParams = URLSearchParams;
+global.AbortController = class {
+  constructor() { this.signal = { aborted: false }; }
+  abort() { this.signal.aborted = true; }
+};
+/* Ответ на журнал событий (/api/kiosk_logs). Если заготовка его не несёт —
+ * отдаём пустой настоящий журнал: экран не должен ничего выдумывать сам. */
+const emptyJournal = {
+  ok: true,
+  data: { entries: [], count: 0, shown: 0, dropped: 0, limit: 400,
+          levels: { info: 0, ok: 0, warn: 0, err: 0, debug: 0 },
+          uptimeSec: 0, source: null, demo: false, journal: 'robot' },
+};
+global.fetch = async (url) => {
+  const text = String(url);
+  if (/camera/.test(text)) {
+    return { ok: true, status: 200, json: async () => ({ ok: true, cameras: [] }) };
+  }
+  if (/kiosk_logs/.test(text)) {
+    return { ok: true, status: 200, json: async () => payload.logs || emptyJournal };
+  }
+  return { ok: true, status: 200, json: async () => payload };
+};
+
+const originalSetTimeout = global.setTimeout;
+global.setTimeout = (cb, ms) => { timeouts.push(cb); return timeouts.length; };
+global.setInterval = () => 0;
+global.clearInterval = () => {};
+
+/* ------------------------------------------------------------- запуск */
+/* Как в странице: сначала общий модуль карты (lidar_view.js), потом экран. */
+const modelFile = path.join(ROOT, 'slam_gui', 'robot_model.js');
+vm.runInThisContext(fs.readFileSync(modelFile, 'utf8'), { filename: modelFile });
+const viewFile = path.join(ROOT, 'slam_gui', 'lidar_view.js');
+vm.runInThisContext(fs.readFileSync(viewFile, 'utf8'), { filename: viewFile });
+// Как в robot.html: общие пресеты руления загружаются до экрана.
+const presetsFile = path.join(ROOT, 'slam_gui', 'steer_presets.js');
+vm.runInThisContext(fs.readFileSync(presetsFile, 'utf8'), { filename: presetsFile });
+let mapShows = 0;
+if (payload.mapOpening) {
+  global.RCMapView = {
+    init() {}, setScan() {},
+    draw() { throw new Error('hidden canvas must not be rendered during navigation'); },
+    show() {
+      if (byId('swipe-page').hidden) throw new Error('page is still hidden');
+      mapShows++;
+      if (payload.mapRenderFailure) throw new Error('test canvas unavailable');
+    },
+  };
+}
+const file = path.join(ROOT, 'slam_gui', screen === 'main' ? 'main.js' : 'robot.js');
+vm.runInThisContext(fs.readFileSync(file, 'utf8'), { filename: file });
+
+const sleep = (ms) => new Promise((resolve) => originalSetTimeout(resolve, ms));
+
+(async function run() {
+  // Даём fetch из boot() завершиться, затем исполняем отложенные кадры
+  // отрисовки: и requestAnimationFrame, и setTimeout здесь под нашим контролем.
+  for (let i = 0; i < 6; i += 1) {
+    await sleep(5);
+    while (rafQueue.length) {
+      const cb = rafQueue.shift();
+      try { cb(Date.now()); } catch (err) { /* экран не должен падать */ }
+    }
+    while (timeouts.length) {
+      const cb = timeouts.shift();
+      try { cb(); } catch (err) { /* dito */ }
+    }
+  }
+
+  const navigation = [];
+  if (screen === 'robot' && payload.batteryNavigation) {
+    byId('ctrl-overlay').hidden = true;
+    function state() {
+      return { battery: !byId('swipe-battery-view').hidden,
+               cameras: !byId('swipe-cameras-view').hidden,
+               motors: !byId('swipe-motors-view').hidden,
+               open: byId('swipe-page').classList.contains('is-open'),
+               title: byId('swipe-title-text').textContent };
+    }
+    byId('battery-panel').click(); navigation.push(state());
+    global._openSwipe('motors'); navigation.push(state());
+    byId('swipe-battery-open').click(); navigation.push(state());
+    byId('swipe-close').click(); navigation.push(state());
+    global._openSwipe('cameras'); navigation.push(state());
+  }
+
+  /* Свайп-жест: карта лидара свайпом больше не открывается. С «камер и
+   * логов» горизонтальный жест просто закрывает страницу, а карта остаётся
+   * доступной только кнопкой. */
+  const mapNavigation = [];
+  if (screen === 'robot' && payload.mapSwipe) {
+    const page = byId('swipe-page');
+    function swipeState() {
+      return { open: byId('swipe-page').classList.contains('is-open'),
+               map: !byId('swipe-map-view').hidden,
+               cameras: !byId('swipe-cameras-view').hidden,
+               motors: !byId('swipe-motors-view').hidden,
+               title: byId('swipe-title-text').textContent,
+               hint: byId('swipe-title-hint').textContent,
+               direction: page.dataset.openDirection };
+    }
+    function dragMouse(fromX, toX) {
+      const target = { clientX: fromX, clientY: 400, button: 0,
+                       target: { closest: () => null } };
+      (page.events.mousedown || []).forEach((fn) => fn(target));
+      global.dispatchEvent({ type: 'mousemove', clientX: toX, clientY: 405,
+                             preventDefault() {} });
+      global.dispatchEvent({ type: 'mouseup', clientX: toX, clientY: 405 });
+    }
+    byId('ctrl-overlay').hidden = true;   // панель функций закрыта — как на борту
+    global._openSwipe('cameras');
+    mapNavigation.push(swipeState());
+    dragMouse(120, 520);            // вправо: страница закрывается, не карта
+    mapNavigation.push(swipeState());
+  }
+
+  const mapOpening = [];
+  if (screen === 'robot' && payload.mapOpening) {
+    const state = () => ({
+      open: byId('swipe-page').classList.contains('is-open'),
+      hidden: byId('swipe-page').hidden,
+      mapHidden: byId('swipe-map-view').hidden,
+      overlayHidden: byId('ctrl-overlay').hidden,
+      title: byId('swipe-title-text').textContent,
+      shows: mapShows,
+      message: byId('map-msg').textContent,
+    });
+    // Use the real Functions -> Map click handlers, not the internal navigation API.
+    byId('k-ctrl-btn').click();
+    byId('btn-map-view').click();
+    for (const cb of rafQueue.splice(0)) cb(Date.now());
+    mapOpening.push(state());
+    byId('swipe-close').click();
+    byId('k-ctrl-btn').click();
+    byId('btn-map-view').click();
+    for (const cb of rafQueue.splice(0)) cb(Date.now());
+    mapOpening.push(state());
+  }
+
+  const meta = byId('lidar-meta');
+  const count = byId('lidar-count');
+  const near = byId('lidar-near');
+  const empty = byId('lidar-empty');
+  const canvas = byId('lidar-canvas');
+  // Панель «Логи»: строки, которые видит оператор (время · уровень · текст).
+  // Скрипт собирает строки во фрагменте и лишь потом вставляет его в список —
+  // в браузере фрагмент не остаётся узлом, поэтому разворачиваем его сами.
+  const logRows = [];
+  function collectRows(element) {
+    if (element.className === 'log-line') logRows.push(element);
+    (element.children || []).forEach(collectRows);
+  }
+  collectRows(byId('log-list'));
+  const logLines = logRows
+    .map((row) => (row.children || []).map((cell) => cell.textContent))
+    .filter((parts) => parts.length)
+    .map((parts) => ({ time: parts[0], level: parts[1], msg: parts.slice(2).join(' ') }));
+  console.log(JSON.stringify({
+    screen,
+    navigation,
+    mapNavigation,
+    mapOpening,
+    soc: byId('k-soc').textContent,
+    volts: byId('k-volts').textContent,
+    batteryState: byId('k-soc-state').textContent,
+    meta: meta.textContent,
+    count: count.textContent,
+    near: near.textContent,
+    emptyHidden: empty.hidden,
+    emptyText: empty.textContent,
+    emptyTitle: empty.title,
+    dots: canvas.dots.length,
+    logLines,
+    logStatus: byId('log-status').textContent,
+    renderErrors,
+    otherWarnings,
+  }, null, 2));
+  console.warn = originalWarn;
+  console.error = originalError;
+})().catch((err) => {
+  originalError(err && err.stack ? err.stack : String(err));
+  process.exit(1);
+});
